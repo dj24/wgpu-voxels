@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{f32::consts::FRAC_PI_4, mem, sync::Arc};
 
-use wgpu::CurrentSurfaceTexture;
+use bytemuck::{Pod, Zeroable};
+use wgpu::{CurrentSurfaceTexture, util::DeviceExt};
 use winit::{
     dpi::PhysicalSize,
     window::{Window, WindowId},
@@ -9,12 +10,85 @@ use winit::{
 const WORKGROUP_SIZE: u32 = 8;
 const OUTPUT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+const SCENE_VERTEX_POSITIONS: [[f32; 3]; 8] = [
+    [-0.75, -0.75, -0.75],
+    [0.75, -0.75, -0.75],
+    [0.75, 0.75, -0.75],
+    [-0.75, 0.75, -0.75],
+    [-0.75, -0.75, 0.75],
+    [0.75, -0.75, 0.75],
+    [0.75, 0.75, 0.75],
+    [-0.75, 0.75, 0.75],
+];
+
+const SCENE_INDICES: [u16; 36] = [
+    0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7, 1, 5, 6, 1, 6, 2, 0, 3,
+    7, 0, 7, 4,
+];
+
+const INSTANCE_POSITIONS: [[f32; 3]; 4] = [
+    [-1.8, 0.0, 0.0],
+    [-0.2, 0.3, -0.8],
+    [1.4, -0.1, 0.4],
+    [0.7, 0.8, -1.6],
+];
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CameraUniform {
+    position: [f32; 4],
+    forward: [f32; 4],
+    right: [f32; 4],
+    up: [f32; 4],
+    viewport: [f32; 4],
+}
+
+struct Camera {
+    position: [f32; 3],
+    target: [f32; 3],
+    up: [f32; 3],
+    vertical_fov_radians: f32,
+}
+
+impl Camera {
+    fn new() -> Self {
+        Self {
+            position: [0.0, 1.2, 5.5],
+            target: [0.0, 0.3, 0.0],
+            up: [0.0, 1.0, 0.0],
+            vertical_fov_radians: FRAC_PI_4,
+        }
+    }
+
+    fn to_uniform(&self, size: PhysicalSize<u32>) -> CameraUniform {
+        let aspect = (size.width.max(1) as f32) / (size.height.max(1) as f32);
+        let forward = normalize3(sub3(self.target, self.position));
+        let right = normalize3(cross3(forward, self.up));
+        let up = normalize3(cross3(right, forward));
+        let tan_half_fov = (self.vertical_fov_radians * 0.5).tan();
+
+        CameraUniform {
+            position: [self.position[0], self.position[1], self.position[2], 0.0],
+            forward: [forward[0], forward[1], forward[2], 0.0],
+            right: [right[0], right[1], right[2], 0.0],
+            up: [up[0], up[1], up[2], 0.0],
+            viewport: [tan_half_fov * aspect, tan_half_fov, aspect, 0.0],
+        }
+    }
+}
+
 pub(crate) struct Renderer {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
+    camera: Camera,
+    camera_buffer: wgpu::Buffer,
+    _scene_vertex_buffer: wgpu::Buffer,
+    _scene_index_buffer: wgpu::Buffer,
+    _blas: wgpu::Blas,
+    tlas: wgpu::Tlas,
     compute_bind_group_layout: wgpu::BindGroupLayout,
     blit_bind_group_layout: wgpu::BindGroupLayout,
     compute_pipeline: wgpu::ComputePipeline,
@@ -28,7 +102,10 @@ pub(crate) struct Renderer {
 
 impl Renderer {
     pub(crate) async fn new(window: Arc<Window>) -> Result<Self, String> {
-        let instance = wgpu::Instance::default();
+        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        instance_desc.backends = wgpu::Backends::VULKAN;
+        let instance = wgpu::Instance::new(instance_desc);
+
         let surface = instance
             .create_surface(window.clone())
             .map_err(|error| format!("create surface: {error}"))?;
@@ -42,12 +119,23 @@ impl Renderer {
             .await
             .map_err(|error| format!("request adapter: {error}"))?;
 
+        let required_features = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        if !adapter.features().contains(required_features) {
+            return Err(String::from(
+                "the selected Vulkan adapter does not support wgpu experimental ray queries",
+            ));
+        }
+
+        let required_limits =
+            wgpu::Limits::default().using_acceleration_structure_values(adapter.limits());
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                required_features,
+                required_limits,
+                // Ray queries are still behind wgpu's experimental feature gate.
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
             })
@@ -71,6 +159,16 @@ impl Renderer {
 
         surface.configure(&device, &surface_config);
 
+        let camera = Camera::new();
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera buffer"),
+            contents: bytemuck::bytes_of(&camera.to_uniform(size)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let (scene_vertex_buffer, scene_index_buffer, blas, tlas) =
+            Self::create_acceleration_scene(&device, &queue);
+
         let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("uv compute shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("compute.wgsl").into()),
@@ -84,16 +182,36 @@ impl Renderer {
         let compute_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("compute bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: OUTPUT_TEXTURE_FORMAT,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: OUTPUT_TEXTURE_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         let blit_bind_group_layout =
@@ -182,6 +300,8 @@ impl Renderer {
                 &compute_bind_group_layout,
                 &blit_bind_group_layout,
                 &sampler,
+                &tlas,
+                &camera_buffer,
             );
 
         Ok(Self {
@@ -190,6 +310,12 @@ impl Renderer {
             device,
             queue,
             surface_config,
+            camera,
+            camera_buffer,
+            _scene_vertex_buffer: scene_vertex_buffer,
+            _scene_index_buffer: scene_index_buffer,
+            _blas: blas,
+            tlas,
             compute_bind_group_layout,
             blit_bind_group_layout,
             compute_pipeline,
@@ -220,6 +346,7 @@ impl Renderer {
         self.surface_config.width = new_size.width;
         self.surface_config.height = new_size.height;
         self.surface.configure(&self.device, &self.surface_config);
+        self.update_camera_buffer();
         self.recreate_output_resources();
     }
 
@@ -256,7 +383,7 @@ impl Renderer {
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("uv compute pass"),
+                label: Some("ray query compute pass"),
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&self.compute_pipeline);
@@ -304,6 +431,8 @@ impl Renderer {
                 &self.compute_bind_group_layout,
                 &self.blit_bind_group_layout,
                 &self.sampler,
+                &self.tlas,
+                &self.camera_buffer,
             );
 
         self.output_texture = output_texture;
@@ -312,12 +441,99 @@ impl Renderer {
         self.blit_bind_group = blit_bind_group;
     }
 
+    fn update_camera_buffer(&self) {
+        let uniform = self.camera.to_uniform(PhysicalSize::new(
+            self.surface_config.width,
+            self.surface_config.height,
+        ));
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    fn create_acceleration_scene(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Blas, wgpu::Tlas) {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene vertex buffer"),
+            contents: bytemuck::cast_slice(&SCENE_VERTEX_POSITIONS),
+            usage: wgpu::BufferUsages::BLAS_INPUT,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene index buffer"),
+            contents: bytemuck::cast_slice(&SCENE_INDICES),
+            usage: wgpu::BufferUsages::BLAS_INPUT,
+        });
+
+        let geometry_size = wgpu::BlasTriangleGeometrySizeDescriptor {
+            vertex_format: wgpu::VertexFormat::Float32x3,
+            vertex_count: SCENE_VERTEX_POSITIONS.len() as u32,
+            index_format: Some(wgpu::IndexFormat::Uint16),
+            index_count: Some(SCENE_INDICES.len() as u32),
+            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+        };
+
+        let blas = device.create_blas(
+            &wgpu::CreateBlasDescriptor {
+                label: Some("scene cube blas"),
+                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+            },
+            wgpu::BlasGeometrySizeDescriptors::Triangles {
+                descriptors: vec![geometry_size.clone()],
+            },
+        );
+
+        let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
+            label: Some("scene tlas"),
+            max_instances: INSTANCE_POSITIONS.len() as u32,
+            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+        });
+
+        for (index, position) in INSTANCE_POSITIONS.iter().enumerate() {
+            tlas[index] = Some(wgpu::TlasInstance::new(
+                &blas,
+                translation_transform(*position),
+                index as u32,
+                0xff,
+            ));
+        }
+
+        let geometry = wgpu::BlasTriangleGeometry {
+            size: &geometry_size,
+            vertex_buffer: &vertex_buffer,
+            first_vertex: 0,
+            vertex_stride: mem::size_of::<[f32; 3]>() as u64,
+            index_buffer: Some(&index_buffer),
+            first_index: Some(0),
+            transform_buffer: None,
+            transform_buffer_offset: None,
+        };
+
+        let blas_build_entry = wgpu::BlasBuildEntry {
+            blas: &blas,
+            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![geometry]),
+        };
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("acceleration structure build encoder"),
+        });
+        encoder.build_acceleration_structures([&blas_build_entry], [&tlas]);
+        queue.submit(Some(encoder.finish()));
+
+        (vertex_buffer, index_buffer, blas, tlas)
+    }
+
     fn create_output_resources(
         device: &wgpu::Device,
         surface_config: &wgpu::SurfaceConfiguration,
         compute_bind_group_layout: &wgpu::BindGroupLayout,
         blit_bind_group_layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
+        tlas: &wgpu::Tlas,
+        camera_buffer: &wgpu::Buffer,
     ) -> (
         wgpu::Texture,
         wgpu::TextureView,
@@ -343,10 +559,20 @@ impl Renderer {
         let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compute bind group"),
             layout: compute_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&output_view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: tlas.as_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -371,4 +597,38 @@ impl Renderer {
             blit_bind_group,
         )
     }
+}
+
+fn translation_transform(position: [f32; 3]) -> [f32; 12] {
+    [
+        1.0,
+        0.0,
+        0.0,
+        position[0],
+        0.0,
+        1.0,
+        0.0,
+        position[1],
+        0.0,
+        0.0,
+        1.0,
+        position[2],
+    ]
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+    [v[0] / len, v[1] / len, v[2] / len]
 }
