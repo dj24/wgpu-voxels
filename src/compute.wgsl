@@ -509,6 +509,13 @@ fn shade_ray_complexity(base_color: vec3<f32>, step_count: u32) -> vec3<f32> {
     return mix(base_color * 0.18, heatmap, 0.88);
 }
 
+fn shade_ndotl(base_color: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let light_direction = normalize(vec3<f32>(0.45, 0.8, 0.35));
+    let ndotl = saturate(dot(normalize(normal), light_direction));
+    let diffuse = 0.15 + ndotl * 0.85;
+    return base_color * diffuse;
+}
+
 fn sample_min_coarse_depth(uv: vec2<f32>) -> f32 {
     let coarse_dims = textureDimensions(coarse_depth_texture, 0);
     if (coarse_dims.x == 0u || coarse_dims.y == 0u) {
@@ -648,7 +655,9 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     if (best_hit.hit) {
-        color = shade_ray_complexity(best_hit.color, best_hit.step_count);
+        let heatmap_color = shade_ray_complexity(best_hit.color, best_hit.step_count);
+        let shaded_color = shade_ndotl(best_hit.color, best_hit.normal);
+        color = select(shaded_color, heatmap_color, uv.x < 0.5);
     }
 
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
