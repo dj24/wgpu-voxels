@@ -78,8 +78,7 @@ impl BlitPass {
             ..Default::default()
         });
 
-        let bind_group =
-            Self::create_bind_group(device, &bind_group_layout, &sampler, output_view);
+        let bind_group = Self::create_bind_group(device, &bind_group_layout, &sampler, output_view);
 
         Self {
             bind_group_layout,

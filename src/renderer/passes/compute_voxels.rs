@@ -14,6 +14,7 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
+        voxel_mask_buffer: &wgpu::Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("uv compute shader"),
@@ -51,6 +52,16 @@ impl ComputeVoxelsPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -69,8 +80,14 @@ impl ComputeVoxelsPass {
             cache: None,
         });
 
-        let bind_group =
-            Self::create_bind_group(device, &bind_group_layout, output_view, tlas, camera_buffer);
+        let bind_group = Self::create_bind_group(
+            device,
+            &bind_group_layout,
+            output_view,
+            tlas,
+            camera_buffer,
+            voxel_mask_buffer,
+        );
 
         Self {
             bind_group_layout,
@@ -85,9 +102,16 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
+        voxel_mask_buffer: &wgpu::Buffer,
     ) {
-        self.bind_group =
-            Self::create_bind_group(device, &self.bind_group_layout, output_view, tlas, camera_buffer);
+        self.bind_group = Self::create_bind_group(
+            device,
+            &self.bind_group_layout,
+            output_view,
+            tlas,
+            camera_buffer,
+            voxel_mask_buffer,
+        );
     }
 
     pub(crate) fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, width: u32, height: u32) {
@@ -110,6 +134,7 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
+        voxel_mask_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compute bind group"),
@@ -126,6 +151,10 @@ impl ComputeVoxelsPass {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: voxel_mask_buffer.as_entire_binding(),
                 },
             ],
         })

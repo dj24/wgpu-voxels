@@ -25,7 +25,11 @@ var scene_tlas: acceleration_structure;
 @group(0) @binding(2)
 var<uniform> camera: Camera;
 
-const VOXEL_GRID_DIM: i32 = 24;
+@group(0) @binding(3)
+var<storage, read> voxel_mask: array<u32>;
+
+const VOXEL_GRID_DIM: i32 = 64;
+const VOXEL_GRID_DIM_U32: u32 = 64u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
 
@@ -76,17 +80,14 @@ fn heatmap_ramp(t: f32) -> vec3<f32> {
     return mix(yellow, hot, (ramp_t - 0.75) / 0.25);
 }
 
-fn sdf_sphere(point: vec3<f32>) -> f32 {
-    return length(point) - 0.55;
-}
-
 fn voxel_size() -> f32 {
     return (OBJECT_BOUNDS_MAX.x - OBJECT_BOUNDS_MIN.x) / f32(VOXEL_GRID_DIM);
 }
 
-fn voxel_center(cell: vec3<i32>) -> vec3<f32> {
-    let size = voxel_size();
-    return OBJECT_BOUNDS_MIN + (vec3<f32>(cell) + vec3<f32>(0.5)) * size;
+fn voxel_index(cell: vec3<i32>) -> u32 {
+    return u32(cell.x)
+        + u32(cell.y) * VOXEL_GRID_DIM_U32
+        + u32(cell.z) * VOXEL_GRID_DIM_U32 * VOXEL_GRID_DIM_U32;
 }
 
 fn voxel_filled(cell: vec3<i32>) -> bool {
@@ -94,7 +95,10 @@ fn voxel_filled(cell: vec3<i32>) -> bool {
         return false;
     }
 
-    return sdf_sphere(voxel_center(cell)) <= 0.0;
+    let index = voxel_index(cell);
+    let word = voxel_mask[index / 32u];
+    let bit = 1u << (index & 31u);
+    return (word & bit) != 0u;
 }
 
 fn voxel_occupancy_value(cell: vec3<i32>) -> f32 {

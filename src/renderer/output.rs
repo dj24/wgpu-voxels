@@ -6,10 +6,7 @@ pub(crate) struct OutputTarget {
 }
 
 impl OutputTarget {
-    pub(crate) fn new(
-        device: &wgpu::Device,
-        surface_config: &wgpu::SurfaceConfiguration,
-    ) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, surface_config: &wgpu::SurfaceConfiguration) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("compute output texture"),
             size: wgpu::Extent3d {

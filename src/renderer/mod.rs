@@ -14,7 +14,7 @@ use crate::{
     InputState,
     scene::{
         Camera, INSTANCE_POSITIONS, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN,
-        ProceduralAccelerationScene,
+        ProceduralAccelerationScene, build_sphere_voxel_mask,
     },
 };
 
@@ -28,6 +28,7 @@ pub(crate) struct Renderer {
     context: GpuContext,
     camera: Camera,
     camera_buffer: wgpu::Buffer,
+    voxel_mask_buffer: wgpu::Buffer,
     procedural_scene: ProceduralAccelerationScene,
     output_target: OutputTarget,
     compute_pass: ComputeVoxelsPass,
@@ -46,6 +47,15 @@ impl Renderer {
                 contents: bytemuck::bytes_of(&camera.to_uniform(context.current_size())),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+        let voxel_mask = build_sphere_voxel_mask(OBJECT_BOUNDS_MIN, OBJECT_BOUNDS_MAX);
+        let voxel_mask_buffer =
+            context
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("voxel occupancy bitmask"),
+                    contents: bytemuck::cast_slice(voxel_mask.as_slice()),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
 
         let procedural_scene = ProceduralAccelerationScene::build(
             &context.device,
@@ -61,6 +71,7 @@ impl Renderer {
             output_target.view(),
             procedural_scene.tlas(),
             &camera_buffer,
+            &voxel_mask_buffer,
         );
         let blit_pass = BlitPass::new(
             &context.device,
@@ -73,6 +84,7 @@ impl Renderer {
             context,
             camera,
             camera_buffer,
+            voxel_mask_buffer,
             procedural_scene,
             output_target,
             compute_pass,
@@ -113,8 +125,11 @@ impl Renderer {
         let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.fps_overlay
-            .update(&self.context.device, &self.context.queue, self.context.current_size());
+        self.fps_overlay.update(
+            &self.context.device,
+            &self.context.queue,
+            self.context.current_size(),
+        );
 
         let mut encoder =
             self.context
@@ -164,6 +179,7 @@ impl Renderer {
             self.output_target.view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,
+            &self.voxel_mask_buffer,
         );
         self.blit_pass
             .rebind(&self.context.device, self.output_target.view());
