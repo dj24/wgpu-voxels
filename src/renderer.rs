@@ -199,6 +199,17 @@ impl Renderer {
         {
             surface_config.format = srgb_format;
         }
+        if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Immediate)
+        {
+            surface_config.present_mode = wgpu::PresentMode::Immediate;
+        } else if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Mailbox)
+        {
+            surface_config.present_mode = wgpu::PresentMode::Mailbox;
+        }
 
         surface.configure(&device, &surface_config);
 
