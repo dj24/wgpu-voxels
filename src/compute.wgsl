@@ -26,10 +26,16 @@ var scene_tlas: acceleration_structure;
 var<uniform> camera: Camera;
 
 @group(0) @binding(3)
-var<storage, read> voxel_mask: array<u32>;
+var<storage, read> voxel_occupancy: array<u32>;
 
 const VOXEL_GRID_DIM: i32 = 64;
 const VOXEL_GRID_DIM_U32: u32 = 64u;
+const REGION_AXIS: i32 = 8;
+const REGION_AXIS_U32: u32 = 8u;
+const REGION_COUNT_U32: u32 = 512u;
+const MASK_WORD_BITS_U32: u32 = 32u;
+const MASK_WORD_COUNT_U32: u32 = 16u;
+const LEAF_MASK_WORD_OFFSET_U32: u32 = MASK_WORD_COUNT_U32;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
 
@@ -84,21 +90,68 @@ fn voxel_size() -> f32 {
     return (OBJECT_BOUNDS_MAX.x - OBJECT_BOUNDS_MIN.x) / f32(VOXEL_GRID_DIM);
 }
 
-fn voxel_index(cell: vec3<i32>) -> u32 {
-    return u32(cell.x)
-        + u32(cell.y) * VOXEL_GRID_DIM_U32
-        + u32(cell.z) * VOXEL_GRID_DIM_U32 * VOXEL_GRID_DIM_U32;
+fn occupancy_word_index(bit_index: u32) -> u32 {
+    return bit_index / MASK_WORD_BITS_U32;
 }
 
-fn voxel_filled(cell: vec3<i32>) -> bool {
+fn occupancy_bit_mask(bit_index: u32) -> u32 {
+    return 1u << (bit_index & 31u);
+}
+
+fn flatten_region_index(region_position: vec3<u32>) -> u32 {
+    return region_position.x
+        + REGION_AXIS_U32 * (region_position.y + REGION_AXIS_U32 * region_position.z);
+}
+
+fn flatten_leaf_index(local_position: vec3<u32>) -> u32 {
+    return local_position.x
+        + REGION_AXIS_U32 * (local_position.y + REGION_AXIS_U32 * local_position.z);
+}
+
+fn leaf_mask_word_offset(region_index: u32) -> u32 {
+    return LEAF_MASK_WORD_OFFSET_U32 + region_index * MASK_WORD_COUNT_U32;
+}
+
+fn region_grid_dimensions() -> vec3<i32> {
+    return vec3<i32>(VOXEL_GRID_DIM / REGION_AXIS);
+}
+
+fn region_mask_at_region_coord(region_position: vec3<i32>) -> bool {
+    let region_dims = region_grid_dimensions();
+    if (any(region_position < vec3<i32>(0)) || any(region_position >= region_dims)) {
+        return false;
+    }
+
+    let region_index = flatten_region_index(vec3<u32>(region_position));
+    let region_word = voxel_occupancy[occupancy_word_index(region_index)];
+    return (region_word & occupancy_bit_mask(region_index)) != 0u;
+}
+
+fn region_occupancy_at(cell: vec3<i32>) -> bool {
     if (any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(VOXEL_GRID_DIM))) {
         return false;
     }
 
-    let index = voxel_index(cell);
-    let word = voxel_mask[index / 32u];
-    let bit = 1u << (index & 31u);
-    return (word & bit) != 0u;
+    let voxel = vec3<u32>(cell);
+    let region = vec3<u32>(voxel.x >> 3u, voxel.y >> 3u, voxel.z >> 3u);
+    let region_index = flatten_region_index(region);
+    let region_word = voxel_occupancy[occupancy_word_index(region_index)];
+    return (region_word & occupancy_bit_mask(region_index)) != 0u;
+}
+
+fn voxel_filled(cell: vec3<i32>) -> bool {
+    if (!region_occupancy_at(cell)) {
+        return false;
+    }
+
+    let voxel = vec3<u32>(cell);
+    let region = vec3<u32>(voxel.x >> 3u, voxel.y >> 3u, voxel.z >> 3u);
+    let region_index = flatten_region_index(region);
+    let leaf_local = vec3<u32>(voxel.x & 7u, voxel.y & 7u, voxel.z & 7u);
+    let leaf_index = flatten_leaf_index(leaf_local);
+    let leaf_word =
+        voxel_occupancy[leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index)];
+    return (leaf_word & occupancy_bit_mask(leaf_index)) != 0u;
 }
 
 fn voxel_occupancy_value(cell: vec3<i32>) -> f32 {
@@ -153,6 +206,7 @@ fn initial_grid_cell(
     t_enter: f32,
     bounds_min: vec3<f32>,
     bounds_max: vec3<f32>,
+    grid_dims: vec3<i32>,
 ) -> vec3<i32> {
     let local_point = clamp(origin + direction * t_enter, bounds_min, bounds_max - vec3<f32>(1e-4));
     let relative = clamp(
@@ -160,22 +214,22 @@ fn initial_grid_cell(
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
-    return min(vec3<i32>(relative * f32(VOXEL_GRID_DIM)), vec3<i32>(VOXEL_GRID_DIM - 1));
+    return min(vec3<i32>(relative * vec3<f32>(grid_dims)), grid_dims - vec3<i32>(1));
 }
 
 fn rebuild_dda_state(
     origin: vec3<f32>,
     direction: vec3<f32>,
     bounds_min: vec3<f32>,
+    cell_size: f32,
     cell: vec3<i32>,
 ) -> vec3<f32> {
-    let size = voxel_size();
     let step_mask = vec3<f32>(
         select(0.0, 1.0, direction.x >= 0.0),
         select(0.0, 1.0, direction.y >= 0.0),
         select(0.0, 1.0, direction.z >= 0.0),
     );
-    let next_boundary = bounds_min + (vec3<f32>(cell) + step_mask) * size;
+    let next_boundary = bounds_min + (vec3<f32>(cell) + step_mask) * cell_size;
     return vec3<f32>(
         select(1e30, (next_boundary.x - origin.x) / direction.x, abs(direction.x) > 1e-5),
         select(1e30, (next_boundary.y - origin.y) / direction.y, abs(direction.y) > 1e-5),
@@ -205,30 +259,92 @@ fn intersect_voxel_object(
 
     var t_enter = box_hit.t_enter;
     let t_exit = box_hit.t_exit;
+    let grid_dims = vec3<i32>(VOXEL_GRID_DIM);
+    let extent = OBJECT_BOUNDS_MAX - OBJECT_BOUNDS_MIN;
     var cell = initial_grid_cell(
         local_origin,
         local_direction,
         t_enter,
         OBJECT_BOUNDS_MIN,
         OBJECT_BOUNDS_MAX,
+        grid_dims,
     );
     let step_dir = vec3<i32>(
         select(-1, 1, local_direction.x >= 0.0),
         select(-1, 1, local_direction.y >= 0.0),
         select(-1, 1, local_direction.z >= 0.0),
     );
-    var t_max = rebuild_dda_state(local_origin, local_direction, OBJECT_BOUNDS_MIN, cell);
     let size = voxel_size();
+    var t_max = rebuild_dda_state(local_origin, local_direction, OBJECT_BOUNDS_MIN, size, cell);
     let t_delta = abs(vec3<f32>(size) / max(abs(local_direction), vec3<f32>(1e-5)));
     var last_axis = -1;
     var step_count = 0u;
+    let advance_epsilon = size * 0.5;
 
     loop {
-        if (any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(VOXEL_GRID_DIM))) {
+        if (any(cell < vec3<i32>(0)) || any(cell >= grid_dims)) {
             break;
         }
 
         step_count = step_count + 1u;
+        if (step_count > 512u) {
+            break;
+        }
+
+        if (!region_occupancy_at(cell)) {
+            let region = vec3<i32>(cell.x >> 3, cell.y >> 3, cell.z >> 3);
+            let region_local = vec3<i32>(cell.x & 7, cell.y & 7, cell.z & 7);
+            let steps_to_region_exit = vec3<i32>(
+                select(region_local.x + 1, REGION_AXIS - region_local.x, step_dir.x > 0),
+                select(region_local.y + 1, REGION_AXIS - region_local.y, step_dir.y > 0),
+                select(region_local.z + 1, REGION_AXIS - region_local.z, step_dir.z > 0),
+            );
+            let t_region_exit = t_max + vec3<f32>(
+                f32(steps_to_region_exit.x - 1) * t_delta.x,
+                f32(steps_to_region_exit.y - 1) * t_delta.y,
+                f32(steps_to_region_exit.z - 1) * t_delta.z,
+            );
+
+            if (t_region_exit.x < t_region_exit.y && t_region_exit.x < t_region_exit.z) {
+                t_enter = t_region_exit.x;
+                last_axis = 0;
+            } else if (t_region_exit.y < t_region_exit.z) {
+                t_enter = t_region_exit.y;
+                last_axis = 1;
+            } else {
+                t_enter = t_region_exit.z;
+                last_axis = 2;
+            }
+
+            if (t_enter > t_exit || t_enter > ray_t_max) {
+                break;
+            }
+
+            let travel_t = min(t_enter + advance_epsilon, t_exit);
+            let advanced_point = clamp(
+                local_origin + local_direction * travel_t,
+                OBJECT_BOUNDS_MIN,
+                OBJECT_BOUNDS_MAX - vec3<f32>(1e-4),
+            );
+            let advanced_relative = clamp(
+                (advanced_point - OBJECT_BOUNDS_MIN) / max(extent, vec3<f32>(1e-5)),
+                vec3<f32>(0.0),
+                vec3<f32>(1.0),
+            );
+            cell = min(vec3<i32>(advanced_relative * vec3<f32>(grid_dims)), grid_dims - vec3<i32>(1));
+            if (all(region == vec3<i32>(cell.x >> 3, cell.y >> 3, cell.z >> 3))) {
+                if (last_axis == 0) {
+                    cell.x = cell.x + step_dir.x * steps_to_region_exit.x;
+                } else if (last_axis == 1) {
+                    cell.y = cell.y + step_dir.y * steps_to_region_exit.y;
+                } else {
+                    cell.z = cell.z + step_dir.z * steps_to_region_exit.z;
+                }
+            }
+            t_max = rebuild_dda_state(local_origin, local_direction, OBJECT_BOUNDS_MIN, size, cell);
+            continue;
+        }
+
         if (voxel_filled(cell)) {
             let gradient = vec3<f32>(
                 voxel_occupancy_value(cell + vec3<i32>(-1, 0, 0)) - voxel_occupancy_value(cell + vec3<i32>(1, 0, 0)),
@@ -266,7 +382,7 @@ fn intersect_voxel_object(
             last_axis = 2;
         }
 
-        if (t_enter > t_exit || t_enter > ray_t_max || step_count > 512u) {
+        if (t_enter > t_exit || t_enter > ray_t_max) {
             break;
         }
     }

@@ -1,11 +1,15 @@
 pub(crate) const VOXEL_GRID_DIM: u32 = 64;
 pub(crate) const VOXEL_GRID_DIM_I32: i32 = VOXEL_GRID_DIM as i32;
-pub(crate) const VOXEL_GRID_VOXEL_COUNT: usize =
-    (VOXEL_GRID_DIM as usize) * (VOXEL_GRID_DIM as usize) * (VOXEL_GRID_DIM as usize);
-pub(crate) const VOXEL_MASK_WORD_COUNT: usize = VOXEL_GRID_VOXEL_COUNT.div_ceil(32);
+pub(crate) const REGION_AXIS: u32 = 8;
+pub(crate) const REGION_COUNT: usize =
+    (REGION_AXIS as usize) * (REGION_AXIS as usize) * (REGION_AXIS as usize);
+pub(crate) const MASK_WORD_BITS: usize = u32::BITS as usize;
+pub(crate) const MASK_WORD_COUNT: usize = REGION_COUNT.div_ceil(MASK_WORD_BITS);
+pub(crate) const LEAF_MASK_WORD_OFFSET: usize = MASK_WORD_COUNT;
+pub(crate) const OCCUPANCY_WORD_COUNT: usize = MASK_WORD_COUNT + REGION_COUNT * MASK_WORD_COUNT;
 
 pub(crate) fn build_sphere_voxel_mask(bounds_min: [f32; 3], bounds_max: [f32; 3]) -> Vec<u32> {
-    let mut words = vec![0u32; VOXEL_MASK_WORD_COUNT];
+    let mut words = vec![0u32; OCCUPANCY_WORD_COUNT];
     let object_extent = bounds_max[0] - bounds_min[0];
     let voxel_size = object_extent / VOXEL_GRID_DIM as f32;
     let radius_sq = 0.55f32 * 0.55f32;
@@ -25,12 +29,7 @@ pub(crate) fn build_sphere_voxel_mask(bounds_min: [f32; 3], bounds_max: [f32; 3]
                     continue;
                 }
 
-                let voxel_index = x as usize
-                    + y as usize * VOXEL_GRID_DIM as usize
-                    + z as usize * VOXEL_GRID_DIM as usize * VOXEL_GRID_DIM as usize;
-                let word_index = voxel_index / 32;
-                let bit_index = voxel_index % 32;
-                words[word_index] |= 1u32 << bit_index;
+                set_occupancy_bit(&mut words, [x as u32, y as u32, z as u32]);
             }
         }
     }
@@ -38,22 +37,185 @@ pub(crate) fn build_sphere_voxel_mask(bounds_min: [f32; 3], bounds_max: [f32; 3]
     words
 }
 
+fn flatten_region_index(region_position: [u32; 3]) -> usize {
+    debug_assert!(region_position[0] < REGION_AXIS);
+    debug_assert!(region_position[1] < REGION_AXIS);
+    debug_assert!(region_position[2] < REGION_AXIS);
+
+    region_position[0] as usize
+        + REGION_AXIS as usize
+            * (region_position[1] as usize + REGION_AXIS as usize * region_position[2] as usize)
+}
+
+fn flatten_leaf_index(local_position: [u32; 3]) -> usize {
+    debug_assert!(local_position[0] < REGION_AXIS);
+    debug_assert!(local_position[1] < REGION_AXIS);
+    debug_assert!(local_position[2] < REGION_AXIS);
+
+    local_position[0] as usize
+        + REGION_AXIS as usize
+            * (local_position[1] as usize + REGION_AXIS as usize * local_position[2] as usize)
+}
+
+fn occupancy_word_and_mask(index: usize) -> (usize, u32) {
+    let word_index = index / MASK_WORD_BITS;
+    let bit_index = index % MASK_WORD_BITS;
+    (word_index, 1u32 << bit_index)
+}
+
+fn region_leaf_word_offset(region_index: usize) -> usize {
+    debug_assert!(region_index < REGION_COUNT);
+    LEAF_MASK_WORD_OFFSET + region_index * MASK_WORD_COUNT
+}
+
+fn region_mask_bit_is_set(occupancy: &[u32], region_index: usize) -> bool {
+    let (word_index, bit_mask) = occupancy_word_and_mask(region_index);
+    occupancy[word_index] & bit_mask != 0
+}
+
+fn occupancy_bit_is_set(occupancy: &[u32], position: [u32; 3]) -> bool {
+    debug_assert!(position[0] < VOXEL_GRID_DIM);
+    debug_assert!(position[1] < VOXEL_GRID_DIM);
+    debug_assert!(position[2] < VOXEL_GRID_DIM);
+
+    let region_position = [position[0] / 8, position[1] / 8, position[2] / 8];
+    let region_index = flatten_region_index(region_position);
+    if !region_mask_bit_is_set(occupancy, region_index) {
+        return false;
+    }
+
+    let leaf_local = [position[0] & 7, position[1] & 7, position[2] & 7];
+    let leaf_index = flatten_leaf_index(leaf_local);
+    let (word_index, bit_mask) = occupancy_word_and_mask(leaf_index);
+    occupancy[region_leaf_word_offset(region_index) + word_index] & bit_mask != 0
+}
+
+fn set_occupancy_bit(occupancy: &mut [u32], position: [u32; 3]) {
+    debug_assert!(position[0] < VOXEL_GRID_DIM);
+    debug_assert!(position[1] < VOXEL_GRID_DIM);
+    debug_assert!(position[2] < VOXEL_GRID_DIM);
+
+    let region_position = [position[0] / 8, position[1] / 8, position[2] / 8];
+    let region_index = flatten_region_index(region_position);
+    let (region_word_index, region_bit_mask) = occupancy_word_and_mask(region_index);
+    occupancy[region_word_index] |= region_bit_mask;
+
+    let leaf_local = [position[0] & 7, position[1] & 7, position[2] & 7];
+    let leaf_index = flatten_leaf_index(leaf_local);
+    let (leaf_word_index, leaf_bit_mask) = occupancy_word_and_mask(leaf_index);
+    occupancy[region_leaf_word_offset(region_index) + leaf_word_index] |= leaf_bit_mask;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{VOXEL_GRID_VOXEL_COUNT, VOXEL_MASK_WORD_COUNT, build_sphere_voxel_mask};
+    use super::{
+        LEAF_MASK_WORD_OFFSET, MASK_WORD_COUNT, OCCUPANCY_WORD_COUNT, REGION_AXIS, REGION_COUNT,
+        VOXEL_GRID_DIM, build_sphere_voxel_mask, flatten_leaf_index, flatten_region_index,
+        occupancy_bit_is_set, region_leaf_word_offset, region_mask_bit_is_set, set_occupancy_bit,
+    };
 
     #[test]
-    fn voxel_mask_uses_one_bit_per_voxel() {
-        assert_eq!(VOXEL_GRID_VOXEL_COUNT, 64 * 64 * 64);
+    fn occupancy_layout_matches_ash_voxels() {
+        assert_eq!(VOXEL_GRID_DIM, 64);
+        assert_eq!(REGION_AXIS, 8);
+        assert_eq!(REGION_COUNT, 512);
+        assert_eq!(MASK_WORD_COUNT, 16);
+        assert_eq!(LEAF_MASK_WORD_OFFSET, 16);
+        assert_eq!(OCCUPANCY_WORD_COUNT, 8_208);
+        assert_eq!(OCCUPANCY_WORD_COUNT * core::mem::size_of::<u32>(), 32_832);
+    }
+
+    #[test]
+    fn setting_one_voxel_marks_one_region_and_one_leaf_bit() {
+        let mut occupancy = vec![0u32; OCCUPANCY_WORD_COUNT];
+        let voxel = [9, 2, 17];
+
+        set_occupancy_bit(&mut occupancy, voxel);
+
+        let region_index = flatten_region_index([1, 0, 2]);
+        assert!(region_mask_bit_is_set(&occupancy, region_index));
         assert_eq!(
-            VOXEL_MASK_WORD_COUNT * core::mem::size_of::<u32>(),
-            32 * 1024
+            occupancy[..MASK_WORD_COUNT]
+                .iter()
+                .filter(|word| **word != 0)
+                .count(),
+            1
+        );
+        assert!(occupancy_bit_is_set(&occupancy, voxel));
+        assert_eq!(
+            occupancy[region_leaf_word_offset(region_index)
+                ..region_leaf_word_offset(region_index) + MASK_WORD_COUNT]
+                .iter()
+                .filter(|word| **word != 0)
+                .count(),
+            1
         );
     }
 
     #[test]
-    fn sphere_mask_sets_some_voxels() {
-        let words = build_sphere_voxel_mask([-0.75, -0.75, -0.75], [0.75, 0.75, 0.75]);
-        assert!(words.iter().any(|word| *word != 0));
+    fn voxels_in_same_region_share_region_mask_but_use_distinct_leaf_bits() {
+        let mut occupancy = vec![0u32; OCCUPANCY_WORD_COUNT];
+        let first = [8, 8, 8];
+        let second = [15, 15, 15];
+
+        set_occupancy_bit(&mut occupancy, first);
+        set_occupancy_bit(&mut occupancy, second);
+
+        let region_index = flatten_region_index([1, 1, 1]);
+        assert!(region_mask_bit_is_set(&occupancy, region_index));
+        assert!(occupancy_bit_is_set(&occupancy, first));
+        assert!(occupancy_bit_is_set(&occupancy, second));
+        assert_eq!(
+            occupancy[..MASK_WORD_COUNT]
+                .iter()
+                .filter(|word| **word != 0)
+                .count(),
+            1
+        );
+        assert_ne!(
+            flatten_leaf_index([first[0] & 7, first[1] & 7, first[2] & 7]),
+            flatten_leaf_index([second[0] & 7, second[1] & 7, second[2] & 7]),
+        );
+    }
+
+    #[test]
+    fn voxels_in_different_regions_use_distinct_region_and_leaf_offsets() {
+        let mut occupancy = vec![0u32; OCCUPANCY_WORD_COUNT];
+        let first = [0, 0, 0];
+        let second = [63, 63, 63];
+
+        set_occupancy_bit(&mut occupancy, first);
+        set_occupancy_bit(&mut occupancy, second);
+
+        let first_region = flatten_region_index([0, 0, 0]);
+        let second_region = flatten_region_index([7, 7, 7]);
+        assert_ne!(first_region, second_region);
+        assert_ne!(
+            region_leaf_word_offset(first_region),
+            region_leaf_word_offset(second_region)
+        );
+        assert!(occupancy_bit_is_set(&occupancy, first));
+        assert!(occupancy_bit_is_set(&occupancy, second));
+        assert_eq!(
+            occupancy[..MASK_WORD_COUNT]
+                .iter()
+                .filter(|word| **word != 0)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn sphere_mask_sets_region_and_leaf_bits() {
+        let occupancy = build_sphere_voxel_mask([-0.75, -0.75, -0.75], [0.75, 0.75, 0.75]);
+
+        assert_eq!(occupancy.len(), OCCUPANCY_WORD_COUNT);
+        assert!(occupancy[..MASK_WORD_COUNT].iter().any(|word| *word != 0));
+        assert!(
+            occupancy[LEAF_MASK_WORD_OFFSET..]
+                .iter()
+                .any(|word| *word != 0)
+        );
+        assert!(occupancy_bit_is_set(&occupancy, [32, 32, 32]));
     }
 }
