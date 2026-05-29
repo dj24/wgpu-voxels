@@ -8,9 +8,8 @@ use winit::{
     window::{Window, WindowId},
 };
 
-mod fps_overlay;
-mod procedural_interop;
 mod renderer;
+mod scene;
 
 use renderer::Renderer;
 

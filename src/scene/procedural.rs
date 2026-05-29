@@ -5,6 +5,16 @@ use wgpu::{hal::CommandEncoder as _, hal::Device as _};
 
 const PLACEHOLDER_TRIANGLE_COUNT: u32 = 128;
 
+pub(crate) const OBJECT_BOUNDS_MIN: [f32; 3] = [-0.75, -0.75, -0.75];
+pub(crate) const OBJECT_BOUNDS_MAX: [f32; 3] = [0.75, 0.75, 0.75];
+
+pub(crate) const INSTANCE_POSITIONS: [[f32; 3]; 4] = [
+    [-1.8, 0.0, 0.0],
+    [-0.2, 0.3, -0.8],
+    [1.4, -0.1, 0.4],
+    [0.7, 0.8, -1.6],
+];
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct AabbPositions {

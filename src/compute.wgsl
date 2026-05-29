@@ -52,6 +52,30 @@ fn palette(index: u32) -> vec3<f32> {
     }
 }
 
+fn saturate(value: f32) -> f32 {
+    return clamp(value, 0.0, 1.0);
+}
+
+fn heatmap_ramp(t: f32) -> vec3<f32> {
+    let cool = vec3<f32>(0.04, 0.05, 0.08);
+    let blue = vec3<f32>(0.05, 0.32, 0.95);
+    let cyan = vec3<f32>(0.05, 0.9, 0.95);
+    let yellow = vec3<f32>(1.0, 0.9, 0.15);
+    let hot = vec3<f32>(1.0, 0.18, 0.08);
+    let ramp_t = saturate(t);
+
+    if (ramp_t < 0.25) {
+        return mix(cool, blue, ramp_t / 0.25);
+    }
+    if (ramp_t < 0.5) {
+        return mix(blue, cyan, (ramp_t - 0.25) / 0.25);
+    }
+    if (ramp_t < 0.75) {
+        return mix(cyan, yellow, (ramp_t - 0.5) / 0.25);
+    }
+    return mix(yellow, hot, (ramp_t - 0.75) / 0.25);
+}
+
 fn sdf_sphere(point: vec3<f32>) -> f32 {
     return length(point) - 0.55;
 }
@@ -261,6 +285,12 @@ fn shade_background(direction: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return sky + grid;
 }
 
+fn shade_ray_complexity(base_color: vec3<f32>, step_count: u32) -> vec3<f32> {
+    let normalized_steps = saturate(log2(f32(step_count) + 1.0) / log2(513.0));
+    let heatmap = heatmap_ramp(normalized_steps);
+    return mix(base_color * 0.18, heatmap, 0.88);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dimensions = textureDimensions(output_texture);
@@ -312,12 +342,7 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     if (best_hit.hit) {
-        let light_dir = normalize(vec3<f32>(0.4, 0.8, 0.3));
-        let diffuse = max(dot(best_hit.normal, light_dir), 0.0);
-        let ambient = 0.18;
-        let fog = exp(-0.08 * best_hit.t);
-        let lit = best_hit.color * (ambient + diffuse * 0.82);
-        color = mix(vec3<f32>(0.03, 0.04, 0.06), lit, fog);
+        color = shade_ray_complexity(best_hit.color, best_hit.step_count);
     }
 
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));

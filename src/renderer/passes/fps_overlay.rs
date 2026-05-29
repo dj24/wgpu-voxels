@@ -75,7 +75,7 @@ impl FpsOverlay {
     pub(crate) fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fps overlay shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("fps_overlay.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../fps_overlay.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
