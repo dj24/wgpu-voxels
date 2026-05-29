@@ -16,6 +16,11 @@ struct RayShade {
     step_count: u32,
 }
 
+struct RayMarchHit {
+    hit: bool,
+    t: f32,
+}
+
 @group(0) @binding(0)
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
@@ -28,6 +33,12 @@ var<uniform> camera: Camera;
 @group(0) @binding(3)
 var<storage, read> voxel_occupancy: array<u32>;
 
+@group(0) @binding(4)
+var coarse_depth_texture: texture_2d<f32>;
+
+@group(0) @binding(5)
+var coarse_depth_output: texture_storage_2d<r32float, write>;
+
 const VOXEL_GRID_DIM: i32 = 64;
 const VOXEL_GRID_DIM_U32: u32 = 64u;
 const REGION_AXIS: i32 = 8;
@@ -38,6 +49,7 @@ const MASK_WORD_COUNT_U32: u32 = 16u;
 const LEAF_MASK_WORD_OFFSET_U32: u32 = MASK_WORD_COUNT_U32;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
+const COARSE_DEPTH_BIAS_SCALE: f32 = 1.7320508;
 
 struct BoxIntersection {
     hit: bool,
@@ -88,6 +100,10 @@ fn heatmap_ramp(t: f32) -> vec3<f32> {
 
 fn voxel_size() -> f32 {
     return (OBJECT_BOUNDS_MAX.x - OBJECT_BOUNDS_MIN.x) / f32(VOXEL_GRID_DIM);
+}
+
+fn region_size() -> f32 {
+    return voxel_size() * f32(REGION_AXIS);
 }
 
 fn occupancy_word_index(bit_index: u32) -> u32 {
@@ -235,6 +251,88 @@ fn rebuild_dda_state(
         select(1e30, (next_boundary.y - origin.y) / direction.y, abs(direction.y) > 1e-5),
         select(1e30, (next_boundary.z - origin.z) / direction.z, abs(direction.z) > 1e-5),
     );
+}
+
+fn intersect_coarse_voxel_object(
+    local_origin: vec3<f32>,
+    local_direction: vec3<f32>,
+    ray_t_min: f32,
+    ray_t_max: f32,
+) -> RayMarchHit {
+    let box_hit = ray_box(
+        local_origin,
+        local_direction,
+        OBJECT_BOUNDS_MIN,
+        OBJECT_BOUNDS_MAX,
+        ray_t_min,
+        ray_t_max,
+    );
+
+    if (!box_hit.hit) {
+        return RayMarchHit(false, ray_t_max);
+    }
+
+    var t_enter = box_hit.t_enter;
+    let t_exit = box_hit.t_exit;
+    let coarse_cell_size = region_size();
+    let grid_dims = region_grid_dimensions();
+    var cell = initial_grid_cell(
+        local_origin,
+        local_direction,
+        t_enter,
+        OBJECT_BOUNDS_MIN,
+        OBJECT_BOUNDS_MAX,
+        grid_dims,
+    );
+    let step_dir = vec3<i32>(
+        select(-1, 1, local_direction.x >= 0.0),
+        select(-1, 1, local_direction.y >= 0.0),
+        select(-1, 1, local_direction.z >= 0.0),
+    );
+    var t_max = rebuild_dda_state(
+        local_origin,
+        local_direction,
+        OBJECT_BOUNDS_MIN,
+        coarse_cell_size,
+        cell,
+    );
+    let t_delta = abs(vec3<f32>(coarse_cell_size) / max(abs(local_direction), vec3<f32>(1e-5)));
+    var step_count = 0u;
+
+    loop {
+        if (any(cell < vec3<i32>(0)) || any(cell >= grid_dims)) {
+            break;
+        }
+
+        step_count = step_count + 1u;
+        if (step_count > 64u) {
+            break;
+        }
+
+        if (region_mask_at_region_coord(cell)) {
+            return RayMarchHit(true, max(t_enter, ray_t_min));
+        }
+
+        if (t_max.x < t_max.y && t_max.x < t_max.z) {
+            t_enter = t_max.x;
+            t_max.x = t_max.x + t_delta.x;
+            cell.x = cell.x + step_dir.x;
+        } else if (t_max.y < t_max.z) {
+            t_enter = t_max.y;
+            t_max.y = t_max.y + t_delta.y;
+            cell.y = cell.y + step_dir.y;
+        } else {
+            t_enter = t_max.z;
+            t_max.z = t_max.z + t_delta.z;
+            cell.z = cell.z + step_dir.z;
+        }
+
+        if (t_enter > t_exit || t_enter > ray_t_max) {
+            break;
+        }
+    }
+
+    return RayMarchHit(false, ray_t_max);
 }
 
 fn intersect_voxel_object(
@@ -411,6 +509,87 @@ fn shade_ray_complexity(base_color: vec3<f32>, step_count: u32) -> vec3<f32> {
     return mix(base_color * 0.18, heatmap, 0.88);
 }
 
+fn sample_min_coarse_depth(uv: vec2<f32>) -> f32 {
+    let coarse_dims = textureDimensions(coarse_depth_texture, 0);
+    if (coarse_dims.x == 0u || coarse_dims.y == 0u) {
+        return 0.0;
+    }
+
+    let coarse_size = vec2<i32>(coarse_dims);
+    let center = clamp(
+        vec2<i32>(uv * vec2<f32>(coarse_dims)),
+        vec2<i32>(0),
+        coarse_size - vec2<i32>(1),
+    );
+    var min_depth = 0.0;
+
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let sample_coord = clamp(
+                center + vec2<i32>(dx, dy),
+                vec2<i32>(0),
+                coarse_size - vec2<i32>(1),
+            );
+            let sample_depth = textureLoad(coarse_depth_texture, sample_coord, 0).x;
+            if (sample_depth <= 0.0) {
+                continue;
+            }
+
+            min_depth = select(sample_depth, min(min_depth, sample_depth), min_depth > 0.0);
+        }
+    }
+
+    return min_depth;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn coarse_depth_prepass_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let coarse_dimensions = textureDimensions(coarse_depth_output);
+    if (id.x >= coarse_dimensions.x || id.y >= coarse_dimensions.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(coarse_dimensions);
+    let ray_origin = camera.position.xyz;
+    let ray_direction = compute_camera_ray_direction(uv);
+
+    var query: ray_query;
+    let ray = RayDesc(0u, 0xffu, 0.01, 100.0, ray_origin, ray_direction);
+    rayQueryInitialize(&query, scene_tlas, ray);
+
+    var coarse_depth = 0.0;
+
+    while (rayQueryProceed(&query)) {
+        let candidate = rayQueryGetCandidateIntersection(&query);
+        if (candidate.kind != 3u) {
+            continue;
+        }
+
+        let committed = rayQueryGetCommittedIntersection(&query);
+        let ray_t_max = select(ray.tmax, committed.t, committed.kind != 0u);
+        let local_origin = (candidate.world_to_object * vec4<f32>(ray_origin, 1.0)).xyz;
+        let local_direction = normalize((candidate.world_to_object * vec4<f32>(ray_direction, 0.0)).xyz);
+        let marched = intersect_coarse_voxel_object(
+            local_origin,
+            local_direction,
+            ray.tmin,
+            ray_t_max,
+        );
+
+        if (marched.hit) {
+            let hit_t = marched.t;
+            rayQueryGenerateIntersection(&query, hit_t);
+            coarse_depth = hit_t;
+        }
+    }
+
+    textureStore(
+        coarse_depth_output,
+        vec2<i32>(id.xy),
+        vec4<f32>(coarse_depth, 0.0, 0.0, 0.0),
+    );
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dimensions = textureDimensions(output_texture);
@@ -421,9 +600,16 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
     let ray_origin = camera.position.xyz;
     let ray_direction = compute_camera_ray_direction(uv);
+    let coarse_depth = sample_min_coarse_depth(uv);
+    let coarse_depth_bias = region_size() * COARSE_DEPTH_BIAS_SCALE;
+    let ray_t_min = select(
+        0.01,
+        clamp(coarse_depth - coarse_depth_bias, 0.01, 99.999),
+        coarse_depth > 0.0,
+    );
 
     var query: ray_query;
-    let ray = RayDesc(0u, 0xffu, 0.01, 100.0, ray_origin, ray_direction);
+    let ray = RayDesc(0u, 0xffu, ray_t_min, 100.0, ray_origin, ray_direction);
     rayQueryInitialize(&query, scene_tlas, ray);
 
     var color = shade_background(ray_direction, uv);

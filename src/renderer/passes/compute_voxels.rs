@@ -1,17 +1,21 @@
-use crate::renderer::output::OUTPUT_TEXTURE_FORMAT;
+use crate::renderer::output::{COARSE_DEPTH_TEXTURE_FORMAT, OUTPUT_TEXTURE_FORMAT};
 
 const WORKGROUP_SIZE: u32 = 8;
 
 pub(crate) struct ComputeVoxelsPass {
-    bind_group_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
-    bind_group: wgpu::BindGroup,
+    coarse_depth_bind_group_layout: wgpu::BindGroupLayout,
+    trace_bind_group_layout: wgpu::BindGroupLayout,
+    coarse_depth_pipeline: wgpu::ComputePipeline,
+    trace_pipeline: wgpu::ComputePipeline,
+    coarse_depth_bind_group: wgpu::BindGroup,
+    trace_bind_group: wgpu::BindGroup,
 }
 
 impl ComputeVoxelsPass {
     pub(crate) fn new(
         device: &wgpu::Device,
         output_view: &wgpu::TextureView,
+        coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
@@ -21,78 +25,163 @@ impl ComputeVoxelsPass {
             source: wgpu::ShaderSource::Wgsl(include_str!("../../compute.wgsl").into()),
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("compute bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: OUTPUT_TEXTURE_FORMAT,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+        let coarse_depth_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("coarse depth bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::AccelerationStructure {
-                        vertex_return: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: COARSE_DEPTH_TEXTURE_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("compute pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
+        let trace_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("trace bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: OUTPUT_TEXTURE_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let coarse_depth_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("coarse depth pipeline layout"),
+                bind_group_layouts: &[Some(&coarse_depth_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let trace_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("trace pipeline layout"),
+                bind_group_layouts: &[Some(&trace_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let coarse_depth_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("coarse depth compute pipeline"),
+                layout: Some(&coarse_depth_pipeline_layout),
+                module: &shader,
+                entry_point: Some("coarse_depth_prepass_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let trace_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("uv compute pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&trace_pipeline_layout),
             module: &shader,
             entry_point: Some("compute_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
 
-        let bind_group = Self::create_bind_group(
+        let coarse_depth_bind_group = Self::create_coarse_depth_bind_group(
             device,
-            &bind_group_layout,
+            &coarse_depth_bind_group_layout,
+            coarse_depth_view,
+            tlas,
+            camera_buffer,
+            voxel_mask_buffer,
+        );
+        let trace_bind_group = Self::create_trace_bind_group(
+            device,
+            &trace_bind_group_layout,
             output_view,
+            coarse_depth_view,
             tlas,
             camera_buffer,
             voxel_mask_buffer,
         );
 
         Self {
-            bind_group_layout,
-            pipeline,
-            bind_group,
+            coarse_depth_bind_group_layout,
+            trace_bind_group_layout,
+            coarse_depth_pipeline,
+            trace_pipeline,
+            coarse_depth_bind_group,
+            trace_bind_group,
         }
     }
 
@@ -100,27 +189,58 @@ impl ComputeVoxelsPass {
         &mut self,
         device: &wgpu::Device,
         output_view: &wgpu::TextureView,
+        coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
     ) {
-        self.bind_group = Self::create_bind_group(
+        self.coarse_depth_bind_group = Self::create_coarse_depth_bind_group(
             device,
-            &self.bind_group_layout,
+            &self.coarse_depth_bind_group_layout,
+            coarse_depth_view,
+            tlas,
+            camera_buffer,
+            voxel_mask_buffer,
+        );
+        self.trace_bind_group = Self::create_trace_bind_group(
+            device,
+            &self.trace_bind_group_layout,
             output_view,
+            coarse_depth_view,
             tlas,
             camera_buffer,
             voxel_mask_buffer,
         );
     }
 
-    pub(crate) fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, width: u32, height: u32) {
+    pub(crate) fn dispatch(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        width: u32,
+        height: u32,
+        coarse_width: u32,
+        coarse_height: u32,
+    ) {
+        {
+            let mut coarse_depth_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("coarse depth compute pass"),
+                timestamp_writes: None,
+            });
+            coarse_depth_pass.set_pipeline(&self.coarse_depth_pipeline);
+            coarse_depth_pass.set_bind_group(0, &self.coarse_depth_bind_group, &[]);
+            coarse_depth_pass.dispatch_workgroups(
+                coarse_width.div_ceil(WORKGROUP_SIZE),
+                coarse_height.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
+
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ray query compute pass"),
             timestamp_writes: None,
         });
-        compute_pass.set_pipeline(&self.pipeline);
-        compute_pass.set_bind_group(0, &self.bind_group, &[]);
+        compute_pass.set_pipeline(&self.trace_pipeline);
+        compute_pass.set_bind_group(0, &self.trace_bind_group, &[]);
         compute_pass.dispatch_workgroups(
             width.div_ceil(WORKGROUP_SIZE),
             height.div_ceil(WORKGROUP_SIZE),
@@ -128,16 +248,49 @@ impl ComputeVoxelsPass {
         );
     }
 
-    fn create_bind_group(
+    fn create_coarse_depth_bind_group(
         device: &wgpu::Device,
         bind_group_layout: &wgpu::BindGroupLayout,
-        output_view: &wgpu::TextureView,
+        coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compute bind group"),
+            layout: bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: tlas.as_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: voxel_mask_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(coarse_depth_view),
+                },
+            ],
+        })
+    }
+
+    fn create_trace_bind_group(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        output_view: &wgpu::TextureView,
+        coarse_depth_view: &wgpu::TextureView,
+        tlas: &wgpu::Tlas,
+        camera_buffer: &wgpu::Buffer,
+        voxel_mask_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("trace bind group"),
             layout: bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -155,6 +308,10 @@ impl ComputeVoxelsPass {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: voxel_mask_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(coarse_depth_view),
                 },
             ],
         })

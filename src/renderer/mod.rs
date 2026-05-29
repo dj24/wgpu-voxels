@@ -69,6 +69,7 @@ impl Renderer {
         let compute_pass = ComputeVoxelsPass::new(
             &context.device,
             output_target.view(),
+            output_target.coarse_depth_view(),
             procedural_scene.tlas(),
             &camera_buffer,
             &voxel_mask_buffer,
@@ -138,10 +139,13 @@ impl Renderer {
                     label: Some("frame encoder"),
                 });
 
+        let (coarse_width, coarse_height) = self.output_target.coarse_depth_size();
         self.compute_pass.dispatch(
             &mut encoder,
             self.context.surface_config().width,
             self.context.surface_config().height,
+            coarse_width,
+            coarse_height,
         );
 
         {
@@ -177,6 +181,7 @@ impl Renderer {
         self.compute_pass.rebind(
             &self.context.device,
             self.output_target.view(),
+            self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,
             &self.voxel_mask_buffer,
