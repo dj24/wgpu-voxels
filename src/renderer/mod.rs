@@ -50,7 +50,7 @@ impl Renderer {
         let procedural_scene = ProceduralAccelerationScene::build(
             &context.device,
             &context.queue,
-            &INSTANCE_POSITIONS,
+            INSTANCE_POSITIONS.as_slice(),
             OBJECT_BOUNDS_MIN,
             OBJECT_BOUNDS_MAX,
         )?;

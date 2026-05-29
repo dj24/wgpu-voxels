@@ -1,4 +1,4 @@
-use std::{mem::size_of, ptr};
+use std::{mem::size_of, ptr, sync::LazyLock};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{hal::CommandEncoder as _, hal::Device as _};
@@ -8,12 +8,25 @@ const PLACEHOLDER_TRIANGLE_COUNT: u32 = 128;
 pub(crate) const OBJECT_BOUNDS_MIN: [f32; 3] = [-0.75, -0.75, -0.75];
 pub(crate) const OBJECT_BOUNDS_MAX: [f32; 3] = [0.75, 0.75, 0.75];
 
-pub(crate) const INSTANCE_POSITIONS: [[f32; 3]; 4] = [
-    [-1.8, 0.0, 0.0],
-    [-0.2, 0.3, -0.8],
-    [1.4, -0.1, 0.4],
-    [0.7, 0.8, -1.6],
-];
+const GRID_DIMENSION: usize = 100;
+const GRID_SPACING: f32 = 1.8;
+
+pub(crate) static INSTANCE_POSITIONS: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
+    let center_offset = (GRID_DIMENSION.saturating_sub(1) as f32 * GRID_SPACING) * 0.5;
+    let mut positions = Vec::with_capacity(GRID_DIMENSION * GRID_DIMENSION);
+
+    for z in 0..GRID_DIMENSION {
+        for x in 0..GRID_DIMENSION {
+            positions.push([
+                x as f32 * GRID_SPACING - center_offset,
+                0.0,
+                z as f32 * GRID_SPACING - center_offset,
+            ]);
+        }
+    }
+
+    positions
+});
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
