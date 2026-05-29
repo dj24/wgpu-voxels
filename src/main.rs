@@ -8,6 +8,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
+mod procedural_interop;
 mod renderer;
 
 use renderer::Renderer;

@@ -7,8 +7,12 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use crate::procedural_interop::ProceduralAccelerationScene;
+
 const WORKGROUP_SIZE: u32 = 8;
 const OUTPUT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const OBJECT_BOUNDS_MIN: [f32; 3] = [-0.75, -0.75, -0.75];
+const OBJECT_BOUNDS_MAX: [f32; 3] = [0.75, 0.75, 0.75];
 
 const SCENE_VERTEX_POSITIONS: [[f32; 3]; 8] = [
     [-0.75, -0.75, -0.75],
@@ -85,6 +89,7 @@ pub(crate) struct Renderer {
     surface_config: wgpu::SurfaceConfiguration,
     camera: Camera,
     camera_buffer: wgpu::Buffer,
+    _procedural_scene: Option<ProceduralAccelerationScene>,
     _scene_vertex_buffer: wgpu::Buffer,
     _scene_index_buffer: wgpu::Buffer,
     _blas: wgpu::Blas,
@@ -165,6 +170,11 @@ impl Renderer {
             contents: bytemuck::bytes_of(&camera.to_uniform(size)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+
+        // The procedural interop prototype stays file-separated for now, but is not
+        // executed during startup yet. The current wgpu native interop path hits a
+        // recursive as_hal snatch lock when we mix several raw resource guards.
+        let procedural_scene = None;
 
         let (scene_vertex_buffer, scene_index_buffer, blas, tlas) =
             Self::create_acceleration_scene(&device, &queue);
@@ -312,6 +322,7 @@ impl Renderer {
             surface_config,
             camera,
             camera_buffer,
+            _procedural_scene: procedural_scene,
             _scene_vertex_buffer: scene_vertex_buffer,
             _scene_index_buffer: scene_index_buffer,
             _blas: blas,
