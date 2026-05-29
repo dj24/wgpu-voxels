@@ -1,4 +1,4 @@
-use std::{f32::consts::FRAC_PI_4, mem, sync::Arc};
+use std::{f32::consts::FRAC_PI_4, sync::Arc};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{CurrentSurfaceTexture, util::DeviceExt};
@@ -13,22 +13,6 @@ const WORKGROUP_SIZE: u32 = 8;
 const OUTPUT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const OBJECT_BOUNDS_MIN: [f32; 3] = [-0.75, -0.75, -0.75];
 const OBJECT_BOUNDS_MAX: [f32; 3] = [0.75, 0.75, 0.75];
-
-const SCENE_VERTEX_POSITIONS: [[f32; 3]; 8] = [
-    [-0.75, -0.75, -0.75],
-    [0.75, -0.75, -0.75],
-    [0.75, 0.75, -0.75],
-    [-0.75, 0.75, -0.75],
-    [-0.75, -0.75, 0.75],
-    [0.75, -0.75, 0.75],
-    [0.75, 0.75, 0.75],
-    [-0.75, 0.75, 0.75],
-];
-
-const SCENE_INDICES: [u16; 36] = [
-    0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7, 1, 5, 6, 1, 6, 2, 0, 3,
-    7, 0, 7, 4,
-];
 
 const INSTANCE_POSITIONS: [[f32; 3]; 4] = [
     [-1.8, 0.0, 0.0],
@@ -89,11 +73,7 @@ pub(crate) struct Renderer {
     surface_config: wgpu::SurfaceConfiguration,
     camera: Camera,
     camera_buffer: wgpu::Buffer,
-    _procedural_scene: Option<ProceduralAccelerationScene>,
-    _scene_vertex_buffer: wgpu::Buffer,
-    _scene_index_buffer: wgpu::Buffer,
-    _blas: wgpu::Blas,
-    tlas: wgpu::Tlas,
+    procedural_scene: ProceduralAccelerationScene,
     compute_bind_group_layout: wgpu::BindGroupLayout,
     blit_bind_group_layout: wgpu::BindGroupLayout,
     compute_pipeline: wgpu::ComputePipeline,
@@ -171,13 +151,13 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // The procedural interop prototype stays file-separated for now, but is not
-        // executed during startup yet. The current wgpu native interop path hits a
-        // recursive as_hal snatch lock when we mix several raw resource guards.
-        let procedural_scene = None;
-
-        let (scene_vertex_buffer, scene_index_buffer, blas, tlas) =
-            Self::create_acceleration_scene(&device, &queue);
+        let procedural_scene = ProceduralAccelerationScene::build(
+            &device,
+            &queue,
+            &INSTANCE_POSITIONS,
+            OBJECT_BOUNDS_MIN,
+            OBJECT_BOUNDS_MAX,
+        )?;
 
         let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("uv compute shader"),
@@ -310,7 +290,7 @@ impl Renderer {
                 &compute_bind_group_layout,
                 &blit_bind_group_layout,
                 &sampler,
-                &tlas,
+                procedural_scene.tlas(),
                 &camera_buffer,
             );
 
@@ -322,11 +302,7 @@ impl Renderer {
             surface_config,
             camera,
             camera_buffer,
-            _procedural_scene: procedural_scene,
-            _scene_vertex_buffer: scene_vertex_buffer,
-            _scene_index_buffer: scene_index_buffer,
-            _blas: blas,
-            tlas,
+            procedural_scene,
             compute_bind_group_layout,
             blit_bind_group_layout,
             compute_pipeline,
@@ -442,7 +418,7 @@ impl Renderer {
                 &self.compute_bind_group_layout,
                 &self.blit_bind_group_layout,
                 &self.sampler,
-                &self.tlas,
+                self.procedural_scene.tlas(),
                 &self.camera_buffer,
             );
 
@@ -459,82 +435,6 @@ impl Renderer {
         ));
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
-    }
-
-    fn create_acceleration_scene(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Blas, wgpu::Tlas) {
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene vertex buffer"),
-            contents: bytemuck::cast_slice(&SCENE_VERTEX_POSITIONS),
-            usage: wgpu::BufferUsages::BLAS_INPUT,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene index buffer"),
-            contents: bytemuck::cast_slice(&SCENE_INDICES),
-            usage: wgpu::BufferUsages::BLAS_INPUT,
-        });
-
-        let geometry_size = wgpu::BlasTriangleGeometrySizeDescriptor {
-            vertex_format: wgpu::VertexFormat::Float32x3,
-            vertex_count: SCENE_VERTEX_POSITIONS.len() as u32,
-            index_format: Some(wgpu::IndexFormat::Uint16),
-            index_count: Some(SCENE_INDICES.len() as u32),
-            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
-        };
-
-        let blas = device.create_blas(
-            &wgpu::CreateBlasDescriptor {
-                label: Some("scene cube blas"),
-                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
-                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-            },
-            wgpu::BlasGeometrySizeDescriptors::Triangles {
-                descriptors: vec![geometry_size.clone()],
-            },
-        );
-
-        let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
-            label: Some("scene tlas"),
-            max_instances: INSTANCE_POSITIONS.len() as u32,
-            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
-            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-        });
-
-        for (index, position) in INSTANCE_POSITIONS.iter().enumerate() {
-            tlas[index] = Some(wgpu::TlasInstance::new(
-                &blas,
-                translation_transform(*position),
-                index as u32,
-                0xff,
-            ));
-        }
-
-        let geometry = wgpu::BlasTriangleGeometry {
-            size: &geometry_size,
-            vertex_buffer: &vertex_buffer,
-            first_vertex: 0,
-            vertex_stride: mem::size_of::<[f32; 3]>() as u64,
-            index_buffer: Some(&index_buffer),
-            first_index: Some(0),
-            transform_buffer: None,
-            transform_buffer_offset: None,
-        };
-
-        let blas_build_entry = wgpu::BlasBuildEntry {
-            blas: &blas,
-            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![geometry]),
-        };
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("acceleration structure build encoder"),
-        });
-        encoder.build_acceleration_structures([&blas_build_entry], [&tlas]);
-        queue.submit(Some(encoder.finish()));
-
-        (vertex_buffer, index_buffer, blas, tlas)
     }
 
     fn create_output_resources(
@@ -608,23 +508,6 @@ impl Renderer {
             blit_bind_group,
         )
     }
-}
-
-fn translation_transform(position: [f32; 3]) -> [f32; 12] {
-    [
-        1.0,
-        0.0,
-        0.0,
-        position[0],
-        0.0,
-        1.0,
-        0.0,
-        position[1],
-        0.0,
-        0.0,
-        1.0,
-        position[2],
-    ]
 }
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {

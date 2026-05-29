@@ -243,7 +243,7 @@ fn intersect_voxel_object(
         }
     }
 
-    return RayShade(false, ray_t_max, vec3<f32>(0.0), palette(instance_custom_data) * 0.18, step_count);
+    return RayShade(false, ray_t_max, vec3<f32>(0.0), vec3<f32>(0.0), step_count);
 }
 
 fn compute_camera_ray_direction(uv: vec2<f32>) -> vec3<f32> {
@@ -276,33 +276,48 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray = RayDesc(0u, 0xffu, 0.01, 100.0, ray_origin, ray_direction);
     rayQueryInitialize(&query, scene_tlas, ray);
 
-    while (rayQueryProceed(&query)) {}
-
-    let committed = rayQueryGetCommittedIntersection(&query);
     var color = shade_background(ray_direction, uv);
+    var best_hit = RayShade(false, ray.tmax, vec3<f32>(0.0), vec3<f32>(0.0), 0u);
 
-    if (committed.kind != 0u) {
-        let local_origin = committed.world_to_object * vec4<f32>(ray_origin, 1.0);
-        let local_direction = normalize(committed.world_to_object * vec4<f32>(ray_direction, 0.0));
+    while (rayQueryProceed(&query)) {
+        let candidate = rayQueryGetCandidateIntersection(&query);
+        if (candidate.kind != 3u) {
+            continue;
+        }
+
+        let committed = rayQueryGetCommittedIntersection(&query);
+        let ray_t_max = select(ray.tmax, committed.t, committed.kind != 0u);
+        let local_origin = (candidate.world_to_object * vec4<f32>(ray_origin, 1.0)).xyz;
+        let local_direction = normalize((candidate.world_to_object * vec4<f32>(ray_direction, 0.0)).xyz);
         let marched = intersect_voxel_object(
             local_origin,
             local_direction,
-            0.001,
-            100.0,
-            committed.instance_custom_data,
+            ray.tmin,
+            ray_t_max,
+            candidate.instance_custom_data,
         );
 
-        if (marched.hit) {
-            let light_dir = normalize(vec3<f32>(0.4, 0.8, 0.3));
-            let world_normal = normalize(committed.object_to_world * vec4<f32>(marched.normal, 0.0));
-            let diffuse = max(dot(world_normal, light_dir), 0.0);
-            let ambient = 0.18;
-            let fog = exp(-0.08 * marched.t);
-            let lit = marched.color * (ambient + diffuse * 0.82);
-            color = mix(vec3<f32>(0.03, 0.04, 0.06), lit, fog);
-        } else {
-            color = marched.color;
+        best_hit.step_count = best_hit.step_count + marched.step_count;
+        if (!marched.hit) {
+            continue;
         }
+
+        let hit_t = marched.t;
+        let world_normal = normalize((candidate.object_to_world * vec4<f32>(marched.normal, 0.0)).xyz);
+        rayQueryGenerateIntersection(&query, hit_t);
+        best_hit.hit = true;
+        best_hit.t = hit_t;
+        best_hit.normal = world_normal;
+        best_hit.color = marched.color;
+    }
+
+    if (best_hit.hit) {
+        let light_dir = normalize(vec3<f32>(0.4, 0.8, 0.3));
+        let diffuse = max(dot(best_hit.normal, light_dir), 0.0);
+        let ambient = 0.18;
+        let fog = exp(-0.08 * best_hit.t);
+        let lit = best_hit.color * (ambient + diffuse * 0.82);
+        color = mix(vec3<f32>(0.03, 0.04, 0.06), lit, fog);
     }
 
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
