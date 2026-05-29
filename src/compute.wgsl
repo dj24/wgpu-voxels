@@ -16,11 +16,6 @@ struct RayShade {
     step_count: u32,
 }
 
-struct RayMarchHit {
-    hit: bool,
-    t: f32,
-}
-
 @group(0) @binding(0)
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
@@ -100,10 +95,6 @@ fn heatmap_ramp(t: f32) -> vec3<f32> {
 
 fn voxel_size() -> f32 {
     return (OBJECT_BOUNDS_MAX.x - OBJECT_BOUNDS_MIN.x) / f32(VOXEL_GRID_DIM);
-}
-
-fn region_size() -> f32 {
-    return voxel_size() * f32(REGION_AXIS);
 }
 
 fn occupancy_word_index(bit_index: u32) -> u32 {
@@ -251,88 +242,6 @@ fn rebuild_dda_state(
         select(1e30, (next_boundary.y - origin.y) / direction.y, abs(direction.y) > 1e-5),
         select(1e30, (next_boundary.z - origin.z) / direction.z, abs(direction.z) > 1e-5),
     );
-}
-
-fn intersect_coarse_voxel_object(
-    local_origin: vec3<f32>,
-    local_direction: vec3<f32>,
-    ray_t_min: f32,
-    ray_t_max: f32,
-) -> RayMarchHit {
-    let box_hit = ray_box(
-        local_origin,
-        local_direction,
-        OBJECT_BOUNDS_MIN,
-        OBJECT_BOUNDS_MAX,
-        ray_t_min,
-        ray_t_max,
-    );
-
-    if (!box_hit.hit) {
-        return RayMarchHit(false, ray_t_max);
-    }
-
-    var t_enter = box_hit.t_enter;
-    let t_exit = box_hit.t_exit;
-    let coarse_cell_size = region_size();
-    let grid_dims = region_grid_dimensions();
-    var cell = initial_grid_cell(
-        local_origin,
-        local_direction,
-        t_enter,
-        OBJECT_BOUNDS_MIN,
-        OBJECT_BOUNDS_MAX,
-        grid_dims,
-    );
-    let step_dir = vec3<i32>(
-        select(-1, 1, local_direction.x >= 0.0),
-        select(-1, 1, local_direction.y >= 0.0),
-        select(-1, 1, local_direction.z >= 0.0),
-    );
-    var t_max = rebuild_dda_state(
-        local_origin,
-        local_direction,
-        OBJECT_BOUNDS_MIN,
-        coarse_cell_size,
-        cell,
-    );
-    let t_delta = abs(vec3<f32>(coarse_cell_size) / max(abs(local_direction), vec3<f32>(1e-5)));
-    var step_count = 0u;
-
-    loop {
-        if (any(cell < vec3<i32>(0)) || any(cell >= grid_dims)) {
-            break;
-        }
-
-        step_count = step_count + 1u;
-        if (step_count > 64u) {
-            break;
-        }
-
-        if (region_mask_at_region_coord(cell)) {
-            return RayMarchHit(true, max(t_enter, ray_t_min));
-        }
-
-        if (t_max.x < t_max.y && t_max.x < t_max.z) {
-            t_enter = t_max.x;
-            t_max.x = t_max.x + t_delta.x;
-            cell.x = cell.x + step_dir.x;
-        } else if (t_max.y < t_max.z) {
-            t_enter = t_max.y;
-            t_max.y = t_max.y + t_delta.y;
-            cell.y = cell.y + step_dir.y;
-        } else {
-            t_enter = t_max.z;
-            t_max.z = t_max.z + t_delta.z;
-            cell.z = cell.z + step_dir.z;
-        }
-
-        if (t_enter > t_exit || t_enter > ray_t_max) {
-            break;
-        }
-    }
-
-    return RayMarchHit(false, ray_t_max);
 }
 
 fn intersect_voxel_object(
@@ -576,11 +485,12 @@ fn coarse_depth_prepass_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let ray_t_max = select(ray.tmax, committed.t, committed.kind != 0u);
         let local_origin = (candidate.world_to_object * vec4<f32>(ray_origin, 1.0)).xyz;
         let local_direction = normalize((candidate.world_to_object * vec4<f32>(ray_direction, 0.0)).xyz);
-        let marched = intersect_coarse_voxel_object(
+        let marched = intersect_voxel_object(
             local_origin,
             local_direction,
             ray.tmin,
             ray_t_max,
+            0u,
         );
 
         if (marched.hit) {
@@ -608,7 +518,7 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray_origin = camera.position.xyz;
     let ray_direction = compute_camera_ray_direction(uv);
     let coarse_depth = sample_min_coarse_depth(uv);
-    let coarse_depth_bias = region_size() * COARSE_DEPTH_BIAS_SCALE;
+    let coarse_depth_bias = voxel_size() * f32(REGION_AXIS) * COARSE_DEPTH_BIAS_SCALE;
     let ray_t_min = select(
         0.01,
         clamp(coarse_depth - coarse_depth_bias, 0.01, 99.999),
