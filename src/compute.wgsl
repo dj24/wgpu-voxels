@@ -196,6 +196,24 @@ fn fallback_normal(direction: vec3<f32>, last_axis: i32, step_dir: vec3<i32>) ->
     return vec3<f32>(0.0, 0.0, select(1.0, -1.0, direction.z >= 0.0));
 }
 
+fn box_surface_normal(
+    point: vec3<f32>,
+    bounds_min: vec3<f32>,
+    bounds_max: vec3<f32>,
+) -> vec3<f32> {
+    let distance_to_min = abs(point - bounds_min);
+    let distance_to_max = abs(bounds_max - point);
+    let min_distance = min(distance_to_min, distance_to_max);
+
+    if (min_distance.x <= min_distance.y && min_distance.x <= min_distance.z) {
+        return vec3<f32>(select(-1.0, 1.0, distance_to_max.x < distance_to_min.x), 0.0, 0.0);
+    }
+    if (min_distance.y <= min_distance.z) {
+        return vec3<f32>(0.0, select(-1.0, 1.0, distance_to_max.y < distance_to_min.y), 0.0);
+    }
+    return vec3<f32>(0.0, 0.0, select(-1.0, 1.0, distance_to_max.z < distance_to_min.z));
+}
+
 fn ray_box(
     origin: vec3<f32>,
     direction: vec3<f32>,
@@ -402,7 +420,18 @@ fn intersect_voxel_object(
         }
     }
 
-    return RayShade(false, ray_t_max, vec3<f32>(0.0), vec3<f32>(0.0), step_count);
+    let box_exit_point = clamp(
+        local_origin + local_direction * t_exit,
+        OBJECT_BOUNDS_MIN,
+        OBJECT_BOUNDS_MAX,
+    );
+    return RayShade(
+        false,
+        t_exit,
+        box_surface_normal(box_exit_point, OBJECT_BOUNDS_MIN, OBJECT_BOUNDS_MAX),
+        palette(instance_custom_data),
+        step_count,
+    );
 }
 
 fn compute_camera_ray_direction(uv: vec2<f32>) -> vec3<f32> {
@@ -539,6 +568,7 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var color = shade_background(ray_direction, uv);
     var best_hit = RayShade(false, ray.tmax, vec3<f32>(0.0), vec3<f32>(0.0), 0u);
+    var best_debug = RayShade(false, ray.tmax, vec3<f32>(0.0), vec3<f32>(0.0), 0u);
 
     while (rayQueryProceed(&query)) {
         let candidate = rayQueryGetCandidateIntersection(&query);
@@ -559,6 +589,9 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
         );
 
         best_hit.step_count = best_hit.step_count + marched.step_count;
+        if (!marched.hit && marched.step_count > 0u && marched.t < best_debug.t) {
+            best_debug = marched;
+        }
         if (!marched.hit) {
             continue;
         }
@@ -576,6 +609,9 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let heatmap_color = shade_ray_complexity(best_hit.color, best_hit.step_count);
         let shaded_color = shade_ndotl(best_hit.color, best_hit.normal);
         color = select(shaded_color, heatmap_color, uv.x < 0.5);
+    } else if (best_debug.step_count > 0u) {
+        let heatmap_color = shade_ray_complexity(best_debug.color, best_debug.step_count);
+        color = select(color, heatmap_color, uv.x < 0.5);
     }
 
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
