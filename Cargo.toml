@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bevy_ecs = { version = "0.18.1", default-features = false }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 glam = "0.30.8"
 pollster = "0.4.0"
+png = "0.17.16"
 wgpu = "29.0.1"
 winit = "0.30.13"

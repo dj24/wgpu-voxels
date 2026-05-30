@@ -8,11 +8,15 @@ pub(crate) const MASK_WORD_COUNT: usize = REGION_COUNT.div_ceil(MASK_WORD_BITS);
 pub(crate) const LEAF_MASK_WORD_OFFSET: usize = MASK_WORD_COUNT;
 pub(crate) const OCCUPANCY_WORD_COUNT: usize = MASK_WORD_COUNT + REGION_COUNT * MASK_WORD_COUNT;
 
-pub(crate) fn build_sphere_voxel_mask(bounds_min: [f32; 3], bounds_max: [f32; 3]) -> Vec<u32> {
+pub(crate) fn build_sphere_voxel_mask(
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+    radius: f32,
+) -> Vec<u32> {
     let mut words = vec![0u32; OCCUPANCY_WORD_COUNT];
     let object_extent = bounds_max[0] - bounds_min[0];
     let voxel_size = object_extent / VOXEL_GRID_DIM as f32;
-    let radius_sq = 0.55f32 * 0.55f32;
+    let radius_sq = radius * radius;
 
     for z in 0..VOXEL_GRID_DIM_I32 {
         for y in 0..VOXEL_GRID_DIM_I32 {
@@ -207,7 +211,7 @@ mod tests {
 
     #[test]
     fn sphere_mask_sets_region_and_leaf_bits() {
-        let occupancy = build_sphere_voxel_mask([-0.75, -0.75, -0.75], [0.75, 0.75, 0.75]);
+        let occupancy = build_sphere_voxel_mask([-0.75, -0.75, -0.75], [0.75, 0.75, 0.75], 0.55);
 
         assert_eq!(occupancy.len(), OCCUPANCY_WORD_COUNT);
         assert!(occupancy[..MASK_WORD_COUNT].iter().any(|word| *word != 0));
@@ -217,5 +221,18 @@ mod tests {
                 .any(|word| *word != 0)
         );
         assert!(occupancy_bit_is_set(&occupancy, [32, 32, 32]));
+    }
+
+    #[test]
+    fn larger_radius_fills_more_voxels() {
+        let small = build_sphere_voxel_mask([-0.75, -0.75, -0.75], [0.75, 0.75, 0.75], 0.25);
+        let large = build_sphere_voxel_mask([-0.75, -0.75, -0.75], [0.75, 0.75, 0.75], 0.70);
+
+        let small_bits = small.iter().map(|word| word.count_ones()).sum::<u32>();
+        let large_bits = large.iter().map(|word| word.count_ones()).sum::<u32>();
+
+        assert!(large_bits > small_bits);
+        assert!(occupancy_bit_is_set(&small, [32, 32, 32]));
+        assert!(occupancy_bit_is_set(&large, [32, 32, 32]));
     }
 }

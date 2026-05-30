@@ -42,6 +42,7 @@ const REGION_COUNT_U32: u32 = 512u;
 const MASK_WORD_BITS_U32: u32 = 32u;
 const MASK_WORD_COUNT_U32: u32 = 16u;
 const LEAF_MASK_WORD_OFFSET_U32: u32 = MASK_WORD_COUNT_U32;
+const OCCUPANCY_WORD_COUNT_U32: u32 = 8208u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
 const COARSE_DEPTH_BIAS_SCALE: f32 = 1.7320508;
@@ -123,18 +124,22 @@ fn region_grid_dimensions() -> vec3<i32> {
     return vec3<i32>(VOXEL_GRID_DIM / REGION_AXIS);
 }
 
-fn region_mask_at_region_coord(region_position: vec3<i32>) -> bool {
+fn object_mask_word(object_mask_offset: u32, word_index: u32) -> u32 {
+    return voxel_occupancy[object_mask_offset + word_index];
+}
+
+fn region_mask_at_region_coord(object_mask_offset: u32, region_position: vec3<i32>) -> bool {
     let region_dims = region_grid_dimensions();
     if (any(region_position < vec3<i32>(0)) || any(region_position >= region_dims)) {
         return false;
     }
 
     let region_index = flatten_region_index(vec3<u32>(region_position));
-    let region_word = voxel_occupancy[occupancy_word_index(region_index)];
+    let region_word = object_mask_word(object_mask_offset, occupancy_word_index(region_index));
     return (region_word & occupancy_bit_mask(region_index)) != 0u;
 }
 
-fn region_occupancy_at(cell: vec3<i32>) -> bool {
+fn region_occupancy_at(object_mask_offset: u32, cell: vec3<i32>) -> bool {
     if (any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(VOXEL_GRID_DIM))) {
         return false;
     }
@@ -142,12 +147,12 @@ fn region_occupancy_at(cell: vec3<i32>) -> bool {
     let voxel = vec3<u32>(cell);
     let region = vec3<u32>(voxel.x >> 3u, voxel.y >> 3u, voxel.z >> 3u);
     let region_index = flatten_region_index(region);
-    let region_word = voxel_occupancy[occupancy_word_index(region_index)];
+    let region_word = object_mask_word(object_mask_offset, occupancy_word_index(region_index));
     return (region_word & occupancy_bit_mask(region_index)) != 0u;
 }
 
-fn voxel_filled(cell: vec3<i32>) -> bool {
-    if (!region_occupancy_at(cell)) {
+fn voxel_filled(object_mask_offset: u32, cell: vec3<i32>) -> bool {
+    if (!region_occupancy_at(object_mask_offset, cell)) {
         return false;
     }
 
@@ -156,13 +161,15 @@ fn voxel_filled(cell: vec3<i32>) -> bool {
     let region_index = flatten_region_index(region);
     let leaf_local = vec3<u32>(voxel.x & 7u, voxel.y & 7u, voxel.z & 7u);
     let leaf_index = flatten_leaf_index(leaf_local);
-    let leaf_word =
-        voxel_occupancy[leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index)];
+    let leaf_word = object_mask_word(
+        object_mask_offset,
+        leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index),
+    );
     return (leaf_word & occupancy_bit_mask(leaf_index)) != 0u;
 }
 
-fn voxel_occupancy_value(cell: vec3<i32>) -> f32 {
-    if (voxel_filled(cell)) {
+fn voxel_occupancy_value(object_mask_offset: u32, cell: vec3<i32>) -> f32 {
+    if (voxel_filled(object_mask_offset, cell)) {
         return 1.0;
     }
     return 0.0;
@@ -251,6 +258,7 @@ fn intersect_voxel_object(
     ray_t_max: f32,
     instance_custom_data: u32,
 ) -> RayShade {
+    let object_mask_offset = instance_custom_data * OCCUPANCY_WORD_COUNT_U32;
     let box_hit = ray_box(
         local_origin,
         local_direction,
@@ -298,7 +306,7 @@ fn intersect_voxel_object(
             break;
         }
 
-        if (!region_occupancy_at(cell)) {
+        if (!region_occupancy_at(object_mask_offset, cell)) {
             let region = vec3<i32>(cell.x >> 3, cell.y >> 3, cell.z >> 3);
             let region_local = vec3<i32>(cell.x & 7, cell.y & 7, cell.z & 7);
             let steps_to_region_exit = vec3<i32>(
@@ -352,11 +360,11 @@ fn intersect_voxel_object(
             continue;
         }
 
-        if (voxel_filled(cell)) {
+        if (voxel_filled(object_mask_offset, cell)) {
             let gradient = vec3<f32>(
-                voxel_occupancy_value(cell + vec3<i32>(-1, 0, 0)) - voxel_occupancy_value(cell + vec3<i32>(1, 0, 0)),
-                voxel_occupancy_value(cell + vec3<i32>(0, -1, 0)) - voxel_occupancy_value(cell + vec3<i32>(0, 1, 0)),
-                voxel_occupancy_value(cell + vec3<i32>(0, 0, -1)) - voxel_occupancy_value(cell + vec3<i32>(0, 0, 1)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(-1, 0, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(1, 0, 0)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, -1, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 1, 0)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, -1)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, 1)),
             );
             let local_normal = select(
                 fallback_normal(local_direction, last_axis, step_dir),
@@ -490,7 +498,7 @@ fn coarse_depth_prepass_main(@builtin(global_invocation_id) id: vec3<u32>) {
             local_direction,
             ray.tmin,
             ray_t_max,
-            0u,
+            candidate.instance_custom_data,
         );
 
         if (marched.hit) {

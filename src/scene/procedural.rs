@@ -1,32 +1,14 @@
-use std::{mem::size_of, ptr, sync::LazyLock};
+use std::{mem::size_of, ptr};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{hal::CommandEncoder as _, hal::Device as _};
+
+use crate::scene::ecs::RenderObject;
 
 const PLACEHOLDER_TRIANGLE_COUNT: u32 = 128;
 
 pub(crate) const OBJECT_BOUNDS_MIN: [f32; 3] = [-0.75, -0.75, -0.75];
 pub(crate) const OBJECT_BOUNDS_MAX: [f32; 3] = [0.75, 0.75, 0.75];
-
-const GRID_DIMENSION: usize = 100;
-const GRID_SPACING: f32 = 1.8;
-
-pub(crate) static INSTANCE_POSITIONS: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
-    let center_offset = (GRID_DIMENSION.saturating_sub(1) as f32 * GRID_SPACING) * 0.5;
-    let mut positions = Vec::with_capacity(GRID_DIMENSION * GRID_DIMENSION);
-
-    for z in 0..GRID_DIMENSION {
-        for x in 0..GRID_DIMENSION {
-            positions.push([
-                x as f32 * GRID_SPACING - center_offset,
-                0.0,
-                z as f32 * GRID_SPACING - center_offset,
-            ]);
-        }
-    }
-
-    positions
-});
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -52,23 +34,23 @@ impl ProceduralAccelerationScene {
     pub(crate) fn build(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        instance_positions: &[[f32; 3]],
+        objects: &[RenderObject],
         bounds_min: [f32; 3],
         bounds_max: [f32; 3],
     ) -> Result<Self, String> {
         let mut blas = create_placeholder_blas(device);
         let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
             label: Some("procedural interop tlas"),
-            max_instances: instance_positions.len() as u32,
+            max_instances: objects.len() as u32,
             flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
             update_mode: wgpu::AccelerationStructureUpdateMode::Build,
         });
 
-        for (index, position) in instance_positions.iter().enumerate() {
+        for (index, object) in objects.iter().enumerate() {
             tlas[index] = Some(wgpu::TlasInstance::new(
                 &blas,
-                translation_transform(*position),
-                index as u32,
+                translation_transform(object.position),
+                object.object_index,
                 0xff,
             ));
         }
@@ -96,7 +78,7 @@ impl ProceduralAccelerationScene {
                 aabb_contents,
             )?;
 
-            let instance_bytes = encode_tlas_instances(&raw_device, &blas, instance_positions)?;
+            let instance_bytes = encode_tlas_instances(&raw_device, &blas, objects)?;
             let instance_input_size = instance_bytes.len() as u64;
             let instance_input = create_raw_buffer_with_contents(
                 &raw_device,
@@ -121,7 +103,7 @@ impl ProceduralAccelerationScene {
                 wgpu::hal::AccelerationStructureInstances {
                     buffer: Some(&instance_input),
                     offset: 0,
-                    count: instance_positions.len() as u32,
+                    count: objects.len() as u32,
                 },
             );
 
@@ -226,7 +208,7 @@ impl ProceduralAccelerationScene {
                         wgpu::hal::AccelerationStructureInstances {
                             buffer: Some(&instance_input),
                             offset: 0,
-                            count: instance_positions.len() as u32,
+                            count: objects.len() as u32,
                         },
                     );
 
@@ -407,17 +389,17 @@ fn create_raw_buffer_with_contents(
 fn encode_tlas_instances(
     raw_device: &wgpu::hal::vulkan::Device,
     blas: &wgpu::Blas,
-    instance_positions: &[[f32; 3]],
+    objects: &[RenderObject],
 ) -> Result<Vec<u8>, String> {
     let blas_address = blas
         .handle()
         .ok_or_else(|| String::from("placeholder BLAS did not expose a raw handle"))?;
 
     let mut bytes = Vec::new();
-    for (index, position) in instance_positions.iter().enumerate() {
+    for object in objects {
         bytes.extend(raw_device.tlas_instance_to_bytes(wgpu::hal::TlasInstance {
-            transform: translation_transform(*position),
-            custom_data: index as u32,
+            transform: translation_transform(object.position),
+            custom_data: object.object_index,
             mask: 0xff,
             blas_address,
         }));

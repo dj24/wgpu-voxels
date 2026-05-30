@@ -1,0 +1,2 @@
+* This is a prototype / demo repo for now, so do not worry about retaining existing structures or paradigms
+* When making changes that effect the engine visually - run headlessly `cargo run -- --headless-png screenshot-headless-<timestamp>.png --delay-ms 1000` and inspect the output. Ensure a timestamp or unique id is added to override codex's image caching. Adjust the delay as necessary. Delete screenshots after checking.
