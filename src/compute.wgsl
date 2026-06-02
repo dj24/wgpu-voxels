@@ -38,11 +38,16 @@ const VOXEL_GRID_DIM: i32 = 64;
 const VOXEL_GRID_DIM_U32: u32 = 64u;
 const REGION_AXIS: i32 = 8;
 const REGION_AXIS_U32: u32 = 8u;
+const COARSE_REGION_AXIS: i32 = 4;
+const COARSE_REGION_AXIS_U32: u32 = 4u;
+const COARSE_CELL_AXIS: i32 = 16;
 const REGION_COUNT_U32: u32 = 512u;
 const MASK_WORD_BITS_U32: u32 = 32u;
 const MASK_WORD_COUNT_U32: u32 = 16u;
-const LEAF_MASK_WORD_OFFSET_U32: u32 = MASK_WORD_COUNT_U32;
-const OCCUPANCY_WORD_COUNT_U32: u32 = 8208u;
+const COARSE_MASK_WORD_COUNT_U32: u32 = 2u;
+const COARSE_MASK_WORD_OFFSET_U32: u32 = MASK_WORD_COUNT_U32;
+const LEAF_MASK_WORD_OFFSET_U32: u32 = COARSE_MASK_WORD_OFFSET_U32 + COARSE_MASK_WORD_COUNT_U32;
+const OCCUPANCY_WORD_COUNT_U32: u32 = 8210u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
 const COARSE_DEPTH_BIAS_SCALE: f32 = 1.7320508;
@@ -116,6 +121,12 @@ fn flatten_leaf_index(local_position: vec3<u32>) -> u32 {
         + REGION_AXIS_U32 * (local_position.y + REGION_AXIS_U32 * local_position.z);
 }
 
+fn flatten_coarse_index(region_position: vec3<u32>) -> u32 {
+    return region_position.x
+        + COARSE_REGION_AXIS_U32
+            * (region_position.y + COARSE_REGION_AXIS_U32 * region_position.z);
+}
+
 fn leaf_mask_word_offset(region_index: u32) -> u32 {
     return LEAF_MASK_WORD_OFFSET_U32 + region_index * MASK_WORD_COUNT_U32;
 }
@@ -124,8 +135,29 @@ fn region_grid_dimensions() -> vec3<i32> {
     return vec3<i32>(VOXEL_GRID_DIM / REGION_AXIS);
 }
 
+fn coarse_region_grid_dimensions() -> vec3<i32> {
+    return vec3<i32>(COARSE_REGION_AXIS);
+}
+
 fn object_mask_word(object_mask_offset: u32, word_index: u32) -> u32 {
     return voxel_occupancy[object_mask_offset + word_index];
+}
+
+fn coarse_region_mask_at_region_coord(
+    object_mask_offset: u32,
+    coarse_region_position: vec3<i32>,
+) -> bool {
+    let coarse_dims = coarse_region_grid_dimensions();
+    if (any(coarse_region_position < vec3<i32>(0)) || any(coarse_region_position >= coarse_dims)) {
+        return false;
+    }
+
+    let coarse_index = flatten_coarse_index(vec3<u32>(coarse_region_position));
+    let coarse_word = object_mask_word(
+        object_mask_offset,
+        COARSE_MASK_WORD_OFFSET_U32 + occupancy_word_index(coarse_index),
+    );
+    return (coarse_word & occupancy_bit_mask(coarse_index)) != 0u;
 }
 
 fn region_mask_at_region_coord(object_mask_offset: u32, region_position: vec3<i32>) -> bool {
@@ -137,6 +169,16 @@ fn region_mask_at_region_coord(object_mask_offset: u32, region_position: vec3<i3
     let region_index = flatten_region_index(vec3<u32>(region_position));
     let region_word = object_mask_word(object_mask_offset, occupancy_word_index(region_index));
     return (region_word & occupancy_bit_mask(region_index)) != 0u;
+}
+
+fn coarse_region_occupancy_at(object_mask_offset: u32, cell: vec3<i32>) -> bool {
+    if (any(cell < vec3<i32>(0)) || any(cell >= vec3<i32>(VOXEL_GRID_DIM))) {
+        return false;
+    }
+
+    let voxel = vec3<u32>(cell);
+    let coarse_region = vec3<u32>(voxel.x >> 4u, voxel.y >> 4u, voxel.z >> 4u);
+    return coarse_region_mask_at_region_coord(object_mask_offset, vec3<i32>(coarse_region));
 }
 
 fn region_occupancy_at(object_mask_offset: u32, cell: vec3<i32>) -> bool {
@@ -322,6 +364,60 @@ fn intersect_voxel_object(
         step_count = step_count + 1u;
         if (step_count > 512u) {
             break;
+        }
+
+        if (!coarse_region_occupancy_at(object_mask_offset, cell)) {
+            let coarse_region = vec3<i32>(cell.x >> 4, cell.y >> 4, cell.z >> 4);
+            let coarse_local = vec3<i32>(cell.x & 15, cell.y & 15, cell.z & 15);
+            let steps_to_coarse_exit = vec3<i32>(
+                select(coarse_local.x + 1, COARSE_CELL_AXIS - coarse_local.x, step_dir.x > 0),
+                select(coarse_local.y + 1, COARSE_CELL_AXIS - coarse_local.y, step_dir.y > 0),
+                select(coarse_local.z + 1, COARSE_CELL_AXIS - coarse_local.z, step_dir.z > 0),
+            );
+            let t_coarse_exit = t_max + vec3<f32>(
+                f32(steps_to_coarse_exit.x - 1) * t_delta.x,
+                f32(steps_to_coarse_exit.y - 1) * t_delta.y,
+                f32(steps_to_coarse_exit.z - 1) * t_delta.z,
+            );
+
+            if (t_coarse_exit.x < t_coarse_exit.y && t_coarse_exit.x < t_coarse_exit.z) {
+                t_enter = t_coarse_exit.x;
+                last_axis = 0;
+            } else if (t_coarse_exit.y < t_coarse_exit.z) {
+                t_enter = t_coarse_exit.y;
+                last_axis = 1;
+            } else {
+                t_enter = t_coarse_exit.z;
+                last_axis = 2;
+            }
+
+            if (t_enter > t_exit || t_enter > ray_t_max) {
+                break;
+            }
+
+            let travel_t = min(t_enter + advance_epsilon, t_exit);
+            let advanced_point = clamp(
+                local_origin + local_direction * travel_t,
+                OBJECT_BOUNDS_MIN,
+                OBJECT_BOUNDS_MAX - vec3<f32>(1e-4),
+            );
+            let advanced_relative = clamp(
+                (advanced_point - OBJECT_BOUNDS_MIN) / max(extent, vec3<f32>(1e-5)),
+                vec3<f32>(0.0),
+                vec3<f32>(1.0),
+            );
+            cell = min(vec3<i32>(advanced_relative * vec3<f32>(grid_dims)), grid_dims - vec3<i32>(1));
+            if (all(coarse_region == vec3<i32>(cell.x >> 4, cell.y >> 4, cell.z >> 4))) {
+                if (last_axis == 0) {
+                    cell.x = cell.x + step_dir.x * steps_to_coarse_exit.x;
+                } else if (last_axis == 1) {
+                    cell.y = cell.y + step_dir.y * steps_to_coarse_exit.y;
+                } else {
+                    cell.z = cell.z + step_dir.z * steps_to_coarse_exit.z;
+                }
+            }
+            t_max = rebuild_dda_state(local_origin, local_direction, OBJECT_BOUNDS_MIN, size, cell);
+            continue;
         }
 
         if (!region_occupancy_at(object_mask_offset, cell)) {
@@ -544,6 +640,8 @@ fn coarse_depth_prepass_main(@builtin(global_invocation_id) id: vec3<u32>) {
     );
 }
 
+const HEATMAP_UV_THRESHOLD = 1.0;
+
 @compute @workgroup_size(8, 8, 1)
 fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dimensions = textureDimensions(output_texture);
@@ -608,10 +706,10 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (best_hit.hit) {
         let heatmap_color = shade_ray_complexity(best_hit.color, best_hit.step_count);
         let shaded_color = shade_ndotl(best_hit.color, best_hit.normal);
-        color = select(shaded_color, heatmap_color, uv.x < 0.5);
+        color = select(shaded_color, heatmap_color, uv.x < HEATMAP_UV_THRESHOLD);
     } else if (best_debug.step_count > 0u) {
         let heatmap_color = shade_ray_complexity(best_debug.color, best_debug.step_count);
-        color = select(color, heatmap_color, uv.x < 0.5);
+        color = select(color, heatmap_color, uv.x < HEATMAP_UV_THRESHOLD);
     }
 
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
