@@ -4,6 +4,8 @@ use bevy_ecs::{
     prelude::{Resource, World},
 };
 
+use crate::scene::{OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN};
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RenderObject {
     pub position: [f32; 3],
@@ -38,32 +40,41 @@ pub(crate) struct ActiveSceneSnapshot {
     pub active_count: usize,
 }
 
-const GRID_DIMENSION: usize = 32;
-const GRID_SPACING: f32 = 1.8;
+// Keep the packed scene under the current compute dispatch limit:
+// object_count * VOXEL_GRID_DIM / workgroup_size_z must stay <= 65535.
+const GRID_DIMENSION: usize = 26;
+const GRID_LAYERS: usize = 3;
 const SPAWN_INTERVAL_SECONDS: f32 = 0.001;
 
 pub(crate) fn build_scene_world() -> SceneWorld {
     let mut world = World::new();
-    let center_offset = (GRID_DIMENSION.saturating_sub(1) as f32 * GRID_SPACING) * 0.5;
-    let mut entities = Vec::with_capacity(GRID_DIMENSION * GRID_DIMENSION);
+    let object_extent_x = OBJECT_BOUNDS_MAX[0] - OBJECT_BOUNDS_MIN[0];
+    let object_extent_y = OBJECT_BOUNDS_MAX[1] - OBJECT_BOUNDS_MIN[1];
+    let object_extent_z = OBJECT_BOUNDS_MAX[2] - OBJECT_BOUNDS_MIN[2];
+    let center_offset_x = (GRID_DIMENSION.saturating_sub(1) as f32 * object_extent_x) * 0.5;
+    let center_offset_y = (GRID_LAYERS.saturating_sub(1) as f32 * object_extent_y) * 0.5;
+    let center_offset_z = (GRID_DIMENSION.saturating_sub(1) as f32 * object_extent_z) * 0.5;
+    let mut entities = Vec::with_capacity(GRID_DIMENSION * GRID_DIMENSION * GRID_LAYERS);
 
-    for z in 0..GRID_DIMENSION {
-        for x in 0..GRID_DIMENSION {
-            let index = entities.len() as u32;
-            let mut entity = world.spawn(SphereObject {
-                position: [
-                    x as f32 * GRID_SPACING - center_offset,
-                    0.0,
-                    z as f32 * GRID_SPACING - center_offset,
-                ],
-                object_index: index,
-            });
+    for y in 0..GRID_LAYERS {
+        for z in 0..GRID_DIMENSION {
+            for x in 0..GRID_DIMENSION {
+                let index = entities.len() as u32;
+                let mut entity = world.spawn(SphereObject {
+                    position: [
+                        x as f32 * object_extent_x - center_offset_x,
+                        y as f32 * object_extent_y - center_offset_y,
+                        z as f32 * object_extent_z - center_offset_z,
+                    ],
+                    object_index: index,
+                });
 
-            if index == 0 {
-                entity.insert(Spawned);
+                if index == 0 {
+                    entity.insert(Spawned);
+                }
+
+                entities.push(entity.id());
             }
-
-            entities.push(entity.id());
         }
     }
 
