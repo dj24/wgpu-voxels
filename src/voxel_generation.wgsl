@@ -18,8 +18,8 @@ const MASK_WORD_COUNT_U32: u32 = 16u;
 const COARSE_MASK_WORD_OFFSET_U32: u32 = 16u;
 const LEAF_MASK_WORD_OFFSET_U32: u32 = 18u;
 const OCCUPANCY_WORD_COUNT_U32: u32 = 8210u;
-const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
-const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
+const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
+const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(1.0, 1.0,1.0);
 const HALF_PI: f32 = 1.5707963;
 
 fn sd_torus(point: vec3<f32>, radii: vec2<f32>) -> f32 {
@@ -45,7 +45,7 @@ fn debug_sdf(point: vec3<f32>) -> f32 {
 }
 
 fn voxel_size() -> f32 {
-    return (OBJECT_BOUNDS_MAX.x - OBJECT_BOUNDS_MIN.x) / f32(VOXEL_GRID_DIM_U32);
+    return 1.0 / f32(VOXEL_GRID_DIM_U32);
 }
 
 fn occupancy_word_index(bit_index: u32) -> u32 {

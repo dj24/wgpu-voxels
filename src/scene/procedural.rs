@@ -7,8 +7,8 @@ use crate::scene::ecs::RenderObject;
 
 const PLACEHOLDER_TRIANGLE_COUNT: u32 = 128;
 
-pub(crate) const OBJECT_BOUNDS_MIN: [f32; 3] = [-0.75, -0.75, -0.75];
-pub(crate) const OBJECT_BOUNDS_MAX: [f32; 3] = [0.75, 0.75, 0.75];
+pub(crate) const OBJECT_BOUNDS_MIN: [f32; 3] = [0.0, 0.0, 0.0];
+pub(crate) const OBJECT_BOUNDS_MAX: [f32; 3] = [1.0, 1.0, 1.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]

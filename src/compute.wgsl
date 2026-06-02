@@ -14,6 +14,7 @@ struct RayShade {
     normal: vec3<f32>,
     color: vec3<f32>,
     step_count: u32,
+    cell: vec3<i32>,
 }
 
 @group(0) @binding(0)
@@ -48,8 +49,8 @@ const COARSE_MASK_WORD_COUNT_U32: u32 = 2u;
 const COARSE_MASK_WORD_OFFSET_U32: u32 = MASK_WORD_COUNT_U32;
 const LEAF_MASK_WORD_OFFSET_U32: u32 = COARSE_MASK_WORD_OFFSET_U32 + COARSE_MASK_WORD_COUNT_U32;
 const OCCUPANCY_WORD_COUNT_U32: u32 = 8210u;
-const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
-const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
+const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
+const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 const COARSE_DEPTH_BIAS_SCALE: f32 = 1.7320508;
 
 struct BoxIntersection {
@@ -329,7 +330,7 @@ fn intersect_voxel_object(
     );
 
     if (!box_hit.hit) {
-        return RayShade(false, ray_t_max, vec3<f32>(0.0), vec3<f32>(0.0), 0u);
+        return RayShade(false, ray_t_max, vec3<f32>(0.0), vec3<f32>(0.0), 0u, vec3<i32>(-1));
     }
 
     var t_enter = box_hit.t_enter;
@@ -491,6 +492,7 @@ fn intersect_voxel_object(
                 local_normal,
                 palette(instance_custom_data),
                 step_count,
+                cell
             );
         }
 
@@ -527,6 +529,7 @@ fn intersect_voxel_object(
         box_surface_normal(box_exit_point, OBJECT_BOUNDS_MIN, OBJECT_BOUNDS_MAX),
         palette(instance_custom_data),
         step_count,
+        vec3<i32>(-1)
     );
 }
 
@@ -580,10 +583,6 @@ fn sample_min_coarse_depth(uv: vec2<f32>) -> f32 {
                 coarse_size - vec2<i32>(1),
             );
             let sample_depth = textureLoad(coarse_depth_texture, sample_coord, 0).x;
-//            if (sample_depth <= 0.0 || sample_depth >= 100.0) {
-//                continue;
-//            }
-
             min_depth = select(sample_depth, min(min_depth, sample_depth), min_depth > 0.0);
         }
     }
@@ -667,8 +666,9 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
     rayQueryInitialize(&query, scene_tlas, ray);
 
     var color = shade_background(ray_direction, uv);
-    var best_hit = RayShade(false, ray.tmax, vec3<f32>(0.0), vec3<f32>(0.0), 0u);
-    var best_debug = RayShade(false, ray.tmax, vec3<f32>(0.0), vec3<f32>(0.0), 0u);
+    var best_hit = RayShade(false, ray.tmax, vec3<f32>(0.0), vec3<f32>(0.0), 0u, vec3<i32>(-1));
+    var best_debug = RayShade(false, ray.tmax, vec3<f32>(0.0), vec3<f32>(0.0), 0u, vec3<i32>(-1));
+    var world_pos = vec3(0.0);
 
     while (rayQueryProceed(&query)) {
         let candidate = rayQueryGetCandidateIntersection(&query);
@@ -679,10 +679,9 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let committed = rayQueryGetCommittedIntersection(&query);
         let ray_t_max = select(ray.tmax, committed.t, committed.kind != 0u);
         let local_origin = (candidate.world_to_object * vec4<f32>(ray_origin, 1.0)).xyz;
-        let local_direction = normalize((candidate.world_to_object * vec4<f32>(ray_direction, 0.0)).xyz);
         let marched = intersect_voxel_object(
             local_origin,
-            local_direction,
+            ray_direction, // chunks will always be axis aligned, so no need for direction transform
             ray.tmin,
             ray_t_max,
             candidate.instance_custom_data,
@@ -698,6 +697,8 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         let hit_t = marched.t;
         let world_normal = normalize((candidate.object_to_world * vec4<f32>(marched.normal, 0.0)).xyz);
+        world_pos = (candidate.object_to_world * vec4(vec3<f32>(marched.cell) / 64.0, 1.0)).xyz;
+
         rayQueryGenerateIntersection(&query, hit_t);
         best_hit.hit = true;
         best_hit.t = hit_t;
@@ -714,7 +715,7 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
         color = select(color, heatmap_color, uv.x < HEATMAP_UV_THRESHOLD);
     }
 
-//    color = vec3(ray_t_min * 0.01);
+    color = (abs(world_pos) *1.0) % 1.0;
 
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }
