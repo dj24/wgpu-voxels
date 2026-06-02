@@ -40,7 +40,9 @@ fn rotate_z(point: vec3<f32>, angle: f32) -> vec3<f32> {
 }
 
 fn debug_sdf(point: vec3<f32>) -> f32 {
-    let rotated_point = rotate_y(point, -frame_params.time_seconds * 0.3);
+    let object_center = (OBJECT_BOUNDS_MIN + OBJECT_BOUNDS_MAX) * 0.5;
+    let centered_point = point - object_center;
+    let rotated_point = rotate_y(centered_point, -frame_params.time_seconds * 0.3);
     return sd_torus(rotate_z(rotated_point, HALF_PI), vec2<f32>(0.38, 0.16));
 }
 
