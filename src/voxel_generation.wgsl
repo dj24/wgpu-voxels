@@ -20,9 +20,28 @@ const LEAF_MASK_WORD_OFFSET_U32: u32 = 18u;
 const OCCUPANCY_WORD_COUNT_U32: u32 = 8210u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(-0.75, -0.75, -0.75);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
+const HALF_PI: f32 = 1.5707963;
 
-fn animated_radius() -> f32 {
-    return 0.50 + 0.18 * sin(frame_params.time_seconds * 1.5);
+fn sd_torus(point: vec3<f32>, radii: vec2<f32>) -> f32 {
+    let q = vec2<f32>(length(point.xz) - radii.x, point.y);
+    return length(q) - radii.y;
+}
+
+fn rotate_y(point: vec3<f32>, angle: f32) -> vec3<f32> {
+    let s = sin(angle);
+    let c = cos(angle);
+    return vec3<f32>(c * point.x + s * point.z, point.y, -s * point.x + c * point.z);
+}
+
+fn rotate_z(point: vec3<f32>, angle: f32) -> vec3<f32> {
+    let s = sin(angle);
+    let c = cos(angle);
+    return vec3<f32>(c * point.x - s * point.y, s * point.x + c * point.y, point.z);
+}
+
+fn debug_sdf(point: vec3<f32>) -> f32 {
+    let rotated_point = rotate_y(point, -frame_params.time_seconds * 0.3);
+    return sd_torus(rotate_z(rotated_point, HALF_PI), vec2<f32>(0.38, 0.16));
 }
 
 fn voxel_size() -> f32 {
@@ -77,7 +96,7 @@ fn clear_occupancy_main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(8, 8, 2)
-fn populate_spheres_main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn populate_debug_sdf_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let total_object_slices = frame_params.object_count * VOXEL_GRID_DIM_U32;
     if (id.x >= VOXEL_GRID_DIM_U32 || id.y >= VOXEL_GRID_DIM_U32 || id.z >= total_object_slices) {
         return;
@@ -88,9 +107,8 @@ fn populate_spheres_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let voxel = vec3<u32>(id.x, id.y, voxel_z);
     let size = voxel_size();
     let center = OBJECT_BOUNDS_MIN + (vec3<f32>(voxel) + vec3<f32>(0.5)) * size;
-    let radius = animated_radius();
 
-    if (dot(center, center) > radius * radius) {
+    if (debug_sdf(center) > 0.0) {
         return;
     }
 

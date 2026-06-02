@@ -712,5 +712,7 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
         color = select(color, heatmap_color, uv.x < HEATMAP_UV_THRESHOLD);
     }
 
+    color = vec3(ray_t_min);
+
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }

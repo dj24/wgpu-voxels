@@ -5,7 +5,7 @@ mod passes;
 use std::{
     path::Path,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -28,6 +28,10 @@ use self::{
     output::OutputTarget,
     passes::{BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass},
 };
+
+const TARGET_VOXEL_UPDATES_PER_SECOND: u64 = 60;
+const TARGET_VOXEL_UPDATE_INTERVAL: Duration =
+    Duration::from_nanos(1_000_000_000 / TARGET_VOXEL_UPDATES_PER_SECOND);
 
 struct PresentationPasses {
     blit_pass: BlitPass,
@@ -52,6 +56,7 @@ pub(crate) struct Renderer {
     object_count: u32,
     active_objects: usize,
     frame_started_at: Instant,
+    last_voxel_update_at: Option<Instant>,
     procedural_scene: ProceduralAccelerationScene,
     output_target: OutputTarget,
     generate_voxels_pass: GenerateVoxelsPass,
@@ -150,6 +155,7 @@ impl Renderer {
             object_count,
             active_objects: active_objects.len(),
             frame_started_at: Instant::now(),
+            last_voxel_update_at: None,
             procedural_scene,
             output_target,
             generate_voxels_pass,
@@ -211,6 +217,7 @@ impl Renderer {
             return Ok(());
         };
         self.update_frame_params_buffer();
+        let should_update_voxels = self.should_update_voxels();
         let presentation = self
             .presentation
             .as_mut()
@@ -234,7 +241,9 @@ impl Renderer {
 
         let (coarse_width, coarse_height) = self.output_target.coarse_depth_size();
         let size = self.context.current_size();
-        self.generate_voxels_pass.dispatch(&mut encoder);
+        if should_update_voxels {
+            self.generate_voxels_pass.dispatch(&mut encoder);
+        }
         self.compute_pass.dispatch(
             &mut encoder,
             size.width,
@@ -285,7 +294,9 @@ impl Renderer {
 
         let (coarse_width, coarse_height) = self.output_target.coarse_depth_size();
         let size = self.context.current_size();
-        self.generate_voxels_pass.dispatch(&mut encoder);
+        if self.should_update_voxels() {
+            self.generate_voxels_pass.dispatch(&mut encoder);
+        }
         self.compute_pass.dispatch(
             &mut encoder,
             size.width,
@@ -341,5 +352,20 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&frame_params),
         );
+    }
+
+    fn should_update_voxels(&mut self) -> bool {
+        let now = Instant::now();
+        let Some(last_update_at) = self.last_voxel_update_at else {
+            self.last_voxel_update_at = Some(now);
+            return true;
+        };
+
+        if now.duration_since(last_update_at) < TARGET_VOXEL_UPDATE_INTERVAL {
+            return false;
+        }
+
+        self.last_voxel_update_at = Some(now);
+        true
     }
 }

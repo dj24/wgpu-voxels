@@ -71,10 +71,10 @@ impl GenerateVoxelsPass {
             cache: None,
         });
         let populate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("populate sphere voxel masks pipeline"),
+            label: Some("populate debug sdf voxel masks pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("populate_spheres_main"),
+            entry_point: Some("populate_debug_sdf_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
@@ -120,7 +120,7 @@ impl GenerateVoxelsPass {
 
         let total_object_slices = self.object_count * VOXEL_GRID_DIM;
         let mut populate_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("populate sphere voxel masks pass"),
+            label: Some("populate debug sdf voxel masks pass"),
             timestamp_writes: None,
         });
         populate_pass.set_pipeline(&self.populate_pipeline);
