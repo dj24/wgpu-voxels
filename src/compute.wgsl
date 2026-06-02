@@ -580,9 +580,9 @@ fn sample_min_coarse_depth(uv: vec2<f32>) -> f32 {
                 coarse_size - vec2<i32>(1),
             );
             let sample_depth = textureLoad(coarse_depth_texture, sample_coord, 0).x;
-            if (sample_depth <= 0.0) {
-                continue;
-            }
+//            if (sample_depth <= 0.0 || sample_depth >= 100.0) {
+//                continue;
+//            }
 
             min_depth = select(sample_depth, min(min_depth, sample_depth), min_depth > 0.0);
         }
@@ -606,7 +606,9 @@ fn coarse_depth_prepass_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray = RayDesc(0u, 0xffu, 0.01, 100.0, ray_origin, ray_direction);
     rayQueryInitialize(&query, scene_tlas, ray);
 
-    var coarse_depth = 0.0;
+    // Use the far ray distance as the empty value so the coarse depth texture
+    // reads back as white when visualized like reversed depth.
+    var coarse_depth = ray.tmax;
 
     while (rayQueryProceed(&query)) {
         let candidate = rayQueryGetCandidateIntersection(&query);
@@ -712,7 +714,7 @@ fn compute_main(@builtin(global_invocation_id) id: vec3<u32>) {
         color = select(color, heatmap_color, uv.x < HEATMAP_UV_THRESHOLD);
     }
 
-    color = vec3(ray_t_min);
+//    color = vec3(ray_t_min * 0.01);
 
     textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }
