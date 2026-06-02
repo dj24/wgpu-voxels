@@ -42,7 +42,7 @@ pub(crate) struct ActiveSceneSnapshot {
 
 const GRID_DIMENSION: usize = 32;
 const GRID_SPACING: f32 = 1.8;
-const SPAWN_INTERVAL_SECONDS: f32 = 0.01;
+const SPAWN_INTERVAL_SECONDS: f32 = 0.001;
 const RADIUS_PATTERN: [f32; 4] = [0.25, 0.40, 0.55, 0.70];
 
 pub(crate) fn build_scene_world() -> SceneWorld {
