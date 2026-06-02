@@ -2,8 +2,13 @@ mod context;
 mod output;
 mod passes;
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::Instant,
+};
 
+use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::{
     dpi::PhysicalSize,
@@ -14,14 +19,14 @@ use crate::{
     InputState,
     scene::{
         Camera, OCCUPANCY_WORD_COUNT, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN,
-        ProceduralAccelerationScene, RenderObject, build_sphere_voxel_mask,
+        ProceduralAccelerationScene, RenderObject,
     },
 };
 
 use self::{
     context::GpuContext,
     output::OutputTarget,
-    passes::{BlitPass, ComputeVoxelsPass, FpsOverlay},
+    passes::{BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass},
 };
 
 struct PresentationPasses {
@@ -29,14 +34,27 @@ struct PresentationPasses {
     fps_overlay: FpsOverlay,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct FrameParams {
+    time_seconds: f32,
+    object_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
 pub(crate) struct Renderer {
     context: GpuContext,
     camera: Camera,
     camera_buffer: wgpu::Buffer,
+    frame_params_buffer: wgpu::Buffer,
     voxel_mask_buffer: wgpu::Buffer,
+    object_count: u32,
     active_objects: usize,
+    frame_started_at: Instant,
     procedural_scene: ProceduralAccelerationScene,
     output_target: OutputTarget,
+    generate_voxels_pass: GenerateVoxelsPass,
     compute_pass: ComputeVoxelsPass,
     presentation: Option<PresentationPasses>,
 }
@@ -66,6 +84,7 @@ impl Renderer {
         active_objects: &[RenderObject],
     ) -> Result<Self, String> {
         let camera = Camera::new();
+        let object_count = all_objects.len() as u32;
         let size = context.current_size();
         let camera_buffer = context
             .device
@@ -74,15 +93,25 @@ impl Renderer {
                 contents: bytemuck::bytes_of(&camera.to_uniform(size)),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-        let voxel_mask = build_scene_voxel_masks(all_objects);
-        let voxel_mask_buffer =
+        let frame_params_buffer =
             context
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("voxel occupancy bitmask"),
-                    contents: bytemuck::cast_slice(voxel_mask.as_slice()),
-                    usage: wgpu::BufferUsages::STORAGE,
+                    label: Some("frame params buffer"),
+                    contents: bytemuck::bytes_of(&FrameParams {
+                        time_seconds: 0.0,
+                        object_count,
+                        _pad0: 0,
+                        _pad1: 0,
+                    }),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
+        let voxel_mask_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("voxel occupancy bitmask"),
+            size: (object_count as u64) * (OCCUPANCY_WORD_COUNT * core::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
         let procedural_scene = ProceduralAccelerationScene::build(
             &context.device,
@@ -93,6 +122,12 @@ impl Renderer {
         )?;
 
         let output_target = OutputTarget::new(&context.device, size.width, size.height);
+        let generate_voxels_pass = GenerateVoxelsPass::new(
+            &context.device,
+            &voxel_mask_buffer,
+            &frame_params_buffer,
+            object_count,
+        );
         let compute_pass = ComputeVoxelsPass::new(
             &context.device,
             output_target.view(),
@@ -110,10 +145,14 @@ impl Renderer {
             context,
             camera,
             camera_buffer,
+            frame_params_buffer,
             voxel_mask_buffer,
+            object_count,
             active_objects: active_objects.len(),
+            frame_started_at: Instant::now(),
             procedural_scene,
             output_target,
+            generate_voxels_pass,
             compute_pass,
             presentation,
         })
@@ -171,6 +210,7 @@ impl Renderer {
         let Some(frame) = self.context.acquire_frame()? else {
             return Ok(());
         };
+        self.update_frame_params_buffer();
         let presentation = self
             .presentation
             .as_mut()
@@ -194,6 +234,7 @@ impl Renderer {
 
         let (coarse_width, coarse_height) = self.output_target.coarse_depth_size();
         let size = self.context.current_size();
+        self.generate_voxels_pass.dispatch(&mut encoder);
         self.compute_pass.dispatch(
             &mut encoder,
             size.width,
@@ -234,6 +275,7 @@ impl Renderer {
     }
 
     pub(crate) fn render_headless(&mut self) -> Result<(), String> {
+        self.update_frame_params_buffer();
         let mut encoder =
             self.context
                 .device
@@ -243,6 +285,7 @@ impl Renderer {
 
         let (coarse_width, coarse_height) = self.output_target.coarse_depth_size();
         let size = self.context.current_size();
+        self.generate_voxels_pass.dispatch(&mut encoder);
         self.compute_pass.dispatch(
             &mut encoder,
             size.width,
@@ -285,16 +328,18 @@ impl Renderer {
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
-}
 
-fn build_scene_voxel_masks(objects: &[RenderObject]) -> Vec<u32> {
-    let mut words = Vec::with_capacity(objects.len() * OCCUPANCY_WORD_COUNT);
-    for object in objects {
-        words.extend(build_sphere_voxel_mask(
-            OBJECT_BOUNDS_MIN,
-            OBJECT_BOUNDS_MAX,
-            object.radius,
-        ));
+    fn update_frame_params_buffer(&self) {
+        let frame_params = FrameParams {
+            time_seconds: self.frame_started_at.elapsed().as_secs_f32(),
+            object_count: self.object_count,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.context.queue.write_buffer(
+            &self.frame_params_buffer,
+            0,
+            bytemuck::bytes_of(&frame_params),
+        );
     }
-    words
 }

@@ -43,9 +43,8 @@ fn run_headless(output_path: &Path, delay: Duration) -> Result<(), Box<dyn std::
 
     let world = build_scene_world();
     let all_objects = collect_all_render_objects(&world);
-    let active_objects = collect_active_render_objects(&world);
     let mut renderer =
-        pollster::block_on(Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &all_objects, &active_objects))?;
+        pollster::block_on(Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &all_objects, &all_objects))?;
     std::thread::sleep(delay);
     renderer.render_headless()?;
     renderer.save_headless_png(output_path)?;

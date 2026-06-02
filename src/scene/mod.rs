@@ -9,4 +9,4 @@ pub(crate) use ecs::{
     collect_active_render_objects, collect_all_render_objects,
 };
 pub(crate) use procedural::{OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN, ProceduralAccelerationScene};
-pub(crate) use voxel_mask::{OCCUPANCY_WORD_COUNT, build_sphere_voxel_mask};
+pub(crate) use voxel_mask::{OCCUPANCY_WORD_COUNT, VOXEL_GRID_DIM};

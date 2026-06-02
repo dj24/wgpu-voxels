@@ -7,14 +7,12 @@ use bevy_ecs::{
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RenderObject {
     pub position: [f32; 3],
-    pub radius: f32,
     pub object_index: u32,
 }
 
 #[derive(Component, Clone, Copy)]
 struct SphereObject {
     position: [f32; 3],
-    radius: f32,
     object_index: u32,
 }
 
@@ -43,7 +41,6 @@ pub(crate) struct ActiveSceneSnapshot {
 const GRID_DIMENSION: usize = 32;
 const GRID_SPACING: f32 = 1.8;
 const SPAWN_INTERVAL_SECONDS: f32 = 0.001;
-const RADIUS_PATTERN: [f32; 4] = [0.25, 0.40, 0.55, 0.70];
 
 pub(crate) fn build_scene_world() -> SceneWorld {
     let mut world = World::new();
@@ -53,14 +50,12 @@ pub(crate) fn build_scene_world() -> SceneWorld {
     for z in 0..GRID_DIMENSION {
         for x in 0..GRID_DIMENSION {
             let index = entities.len() as u32;
-            let radius = RADIUS_PATTERN[index as usize % RADIUS_PATTERN.len()];
             let mut entity = world.spawn(SphereObject {
                 position: [
                     x as f32 * GRID_SPACING - center_offset,
                     0.0,
                     z as f32 * GRID_SPACING - center_offset,
                 ],
-                radius,
                 object_index: index,
             });
 
@@ -134,7 +129,6 @@ fn collect_render_objects(world: &SceneWorld, include_unspawned: bool) -> Vec<Re
         let sphere = entity_ref.get::<SphereObject>().expect("sphere object");
         objects.push(RenderObject {
             position: sphere.position,
-            radius: sphere.radius,
             object_index: sphere.object_index,
         });
     }
