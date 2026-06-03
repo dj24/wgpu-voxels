@@ -152,8 +152,11 @@ impl Renderer {
         );
         let compute_pass = ComputeVoxelsPass::new(
             &context.device,
+            size.width,
+            size.height,
             output_target.view(),
             output_target.world_position_view(),
+            output_target.shading_input_view(),
             output_target.coarse_depth_view(),
             procedural_scene.tlas(),
             &camera_buffer,
@@ -212,8 +215,11 @@ impl Renderer {
         self.active_objects = active_objects.len();
         self.compute_pass.rebind(
             &self.context.device,
+            self.context.current_size().width,
+            self.context.current_size().height,
             self.output_target.view(),
             self.output_target.world_position_view(),
+            self.output_target.shading_input_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,
@@ -342,8 +348,11 @@ impl Renderer {
             .recreate(&self.context.device, size.width, size.height);
         self.compute_pass.rebind(
             &self.context.device,
+            size.width,
+            size.height,
             self.output_target.view(),
             self.output_target.world_position_view(),
+            self.output_target.shading_input_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,

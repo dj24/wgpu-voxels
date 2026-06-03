@@ -16,6 +16,7 @@ struct DebugVisualizationParams {
 struct RayMarch {
     hit: bool,
     t: f32,
+    normal: vec3<f32>,
     cell: vec3<i32>,
 }
 
@@ -23,6 +24,16 @@ struct BoxIntersection {
     hit: bool,
     t_enter: f32,
     t_exit: f32,
+}
+
+struct ShadeCommandCounter {
+    value: atomic<u32>,
+}
+
+struct DispatchIndirectArgsStorage {
+    x: u32,
+    y: u32,
+    z: u32,
 }
 
 @group(0) @binding(0)
@@ -43,6 +54,9 @@ var coarse_depth_output: texture_storage_2d<r32float, write>;
 @group(0) @binding(5)
 var world_position_output: texture_storage_2d<rgba32float, write>;
 
+@group(0) @binding(6)
+var shading_input_output: texture_storage_2d<rgba32float, write>;
+
 @group(1) @binding(0)
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
@@ -51,6 +65,18 @@ var world_position_texture: texture_2d<f32>;
 
 @group(1) @binding(2)
 var<uniform> debug_visualization: DebugVisualizationParams;
+
+@group(1) @binding(3)
+var shading_input_texture: texture_2d<f32>;
+
+@group(1) @binding(4)
+var<storage, read_write> shade_command_count: ShadeCommandCounter;
+
+@group(1) @binding(5)
+var<storage, read_write> shade_commands: array<vec2<u32>>;
+
+@group(1) @binding(6)
+var<storage, read_write> shade_dispatch_args: DispatchIndirectArgsStorage;
 
 const VOXEL_GRID_DIM: i32 = 64;
 const REGION_AXIS: i32 = 8;
@@ -68,12 +94,32 @@ const MAX_RAY_MARCH_STEPS: u32 = 512u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 const COARSE_DEPTH_BIAS_SCALE: f32 = 1.7320508;
+const SHADOW_RAY_T_MIN: f32 = 0.001;
+const SHADOW_RAY_T_MAX: f32 = 100.0;
+const SHADE_COMMAND_WORKGROUP_SIZE: u32 = 64u;
 
 var<workgroup> shared_keys: array<vec4<f32>, 64>;
 var<workgroup> shared_valid: array<u32, 64>;
 
 fn saturate(value: f32) -> f32 {
     return clamp(value, 0.0, 1.0);
+}
+
+fn palette(index: u32) -> vec3<f32> {
+    switch index % 4u {
+        case 0u: {
+            return vec3<f32>(0.96, 0.28, 0.24);
+        }
+        case 1u: {
+            return vec3<f32>(0.16, 0.72, 0.98);
+        }
+        case 2u: {
+            return vec3<f32>(0.98, 0.78, 0.24);
+        }
+        default: {
+            return vec3<f32>(0.30, 0.92, 0.46);
+        }
+    }
 }
 
 fn voxel_size() -> f32 {
@@ -176,6 +222,34 @@ fn voxel_filled(object_mask_offset: u32, cell: vec3<i32>) -> bool {
     return (leaf_word & occupancy_bit_mask(leaf_index)) != 0u;
 }
 
+fn voxel_occupancy_value(object_mask_offset: u32, cell: vec3<i32>) -> f32 {
+    if (voxel_filled(object_mask_offset, cell)) {
+        return 1.0;
+    }
+    return 0.0;
+}
+
+fn fallback_normal(direction: vec3<f32>, last_axis: i32, step_dir: vec3<i32>) -> vec3<f32> {
+    if (last_axis == 0) {
+        return vec3<f32>(-f32(step_dir.x), 0.0, 0.0);
+    }
+    if (last_axis == 1) {
+        return vec3<f32>(0.0, -f32(step_dir.y), 0.0);
+    }
+    if (last_axis == 2) {
+        return vec3<f32>(0.0, 0.0, -f32(step_dir.z));
+    }
+
+    let axis = abs(direction);
+    if (axis.x >= axis.y && axis.x >= axis.z) {
+        return vec3<f32>(select(1.0, -1.0, direction.x >= 0.0), 0.0, 0.0);
+    }
+    if (axis.y >= axis.z) {
+        return vec3<f32>(0.0, select(1.0, -1.0, direction.y >= 0.0), 0.0);
+    }
+    return vec3<f32>(0.0, 0.0, select(1.0, -1.0, direction.z >= 0.0));
+}
+
 fn ray_box(
     origin: vec3<f32>,
     direction: vec3<f32>,
@@ -249,7 +323,7 @@ fn intersect_voxel_object(
     );
 
     if (!box_hit.hit) {
-        return RayMarch(false, ray_t_max, vec3<i32>(-1));
+        return RayMarch(false, ray_t_max, vec3<f32>(0.0), vec3<i32>(-1));
     }
 
     var t_enter = box_hit.t_enter;
@@ -395,7 +469,17 @@ fn intersect_voxel_object(
         }
 
         if (voxel_filled(object_mask_offset, cell)) {
-            return RayMarch(true, max(t_enter, ray_t_min), cell);
+            let gradient = vec3<f32>(
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(-1, 0, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(1, 0, 0)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, -1, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 1, 0)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, -1)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, 1)),
+            );
+            let local_normal = select(
+                fallback_normal(local_direction, last_axis, step_dir),
+                normalize(gradient),
+                length(gradient) > 1e-5,
+            );
+            return RayMarch(true, max(t_enter, ray_t_min), local_normal, cell);
         }
 
         if (t_max.x < t_max.y && t_max.x < t_max.z) {
@@ -417,7 +501,7 @@ fn intersect_voxel_object(
         }
     }
 
-    return RayMarch(false, t_exit, vec3<i32>(-1));
+    return RayMarch(false, t_exit, vec3<f32>(0.0), vec3<i32>(-1));
 }
 
 fn compute_camera_ray_direction(uv: vec2<f32>) -> vec3<f32> {
@@ -432,6 +516,17 @@ fn debug_background(uv: vec2<f32>) -> vec3<f32> {
     let base = mix(vec3<f32>(0.04, 0.05, 0.07), vec3<f32>(0.10, 0.12, 0.16), uv.y);
     let band = 0.03 * vec3<f32>(uv.x, 1.0 - uv.y, 0.5 + 0.5 * uv.x);
     return base + band;
+}
+
+fn shade_ndotl(base_color: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let light_direction = normalize(vec3<f32>(0.45, 0.8, 0.35));
+    let ndotl = saturate(dot(normalize(normal), light_direction));
+    let diffuse = 0.15 + ndotl * 0.85;
+    return base_color * diffuse;
+}
+
+fn sun_direction() -> vec3<f32> {
+    return normalize(vec3<f32>(0.45, 0.8, 0.35));
 }
 
 fn sample_min_coarse_depth(uv: vec2<f32>) -> f32 {
@@ -490,6 +585,52 @@ fn per_pixel_debug_color(world_position: vec3<f32>, gid: vec2<u32>) -> vec3<f32>
     return clamp(base_color + (noise - 0.5) * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn shade_from_input(shading_input: vec4<f32>) -> vec3<f32> {
+    let object_index = u32(max(shading_input.w, 0.0));
+    return shade_ndotl(palette(object_index), shading_input.xyz);
+}
+
+fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
+    let ray_direction = sun_direction();
+    let ray_origin =
+        world_position + ray_direction * voxel_size();
+
+    var query: ray_query;
+    let ray = RayDesc(0u, 0xffu, SHADOW_RAY_T_MIN, SHADOW_RAY_T_MAX, ray_origin, ray_direction);
+    rayQueryInitialize(&query, scene_tlas, ray);
+
+    while (rayQueryProceed(&query)) {
+        let candidate = rayQueryGetCandidateIntersection(&query);
+        if (candidate.kind != 3u) {
+            continue;
+        }
+
+        let committed = rayQueryGetCommittedIntersection(&query);
+        let ray_t_max = select(ray.tmax, committed.t, committed.kind != 0u);
+        let local_origin = (candidate.world_to_object * vec4<f32>(ray_origin, 1.0)).xyz;
+        let local_direction =
+            normalize((candidate.world_to_object * vec4<f32>(ray_direction, 0.0)).xyz);
+        let marched = intersect_voxel_object(
+            local_origin,
+            local_direction,
+            ray.tmin,
+            ray_t_max,
+            candidate.instance_custom_data,
+        );
+
+        if (marched.hit) {
+            return 0.0;
+        }
+    }
+
+    return 1.0;
+}
+
+fn shaded_color(world_position: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32> {
+    let visibility = sun_visibility(world_position, shading_input.xyz);
+    return shade_from_input(shading_input) * visibility;
+}
+
 fn local_index(local_id: vec2<u32>) -> u32 {
     return local_id.y * 8u + local_id.x;
 }
@@ -504,6 +645,64 @@ fn base_index_2x2(block_id: u32) -> u32 {
     let base_x = (block_id & 3u) * 2u;
     let base_y = (block_id >> 2u) * 2u;
     return base_y * 8u + base_x;
+}
+
+fn block_origin_from_base_index(workgroup_origin: vec2<u32>, base_index: u32) -> vec2<u32> {
+    let local_x = base_index & 7u;
+    let local_y = base_index >> 3u;
+    return workgroup_origin + vec2<u32>(local_x, local_y);
+}
+
+fn max_command_count() -> u32 {
+    let dimensions = textureDimensions(world_position_texture);
+    return dimensions.x * dimensions.y;
+}
+
+fn coverage_mode_for_size(coverage_size: vec2<u32>) -> u32 {
+    if (coverage_size.x == 4u && coverage_size.y == 4u) {
+        return 2u;
+    }
+    if (coverage_size.x == 2u && coverage_size.y == 2u) {
+        return 1u;
+    }
+    return 0u;
+}
+
+fn coverage_size_from_mode(coverage_mode: u32) -> vec2<u32> {
+    switch coverage_mode {
+        case 2u: {
+            return vec2<u32>(4u, 4u);
+        }
+        case 1u: {
+            return vec2<u32>(2u, 2u);
+        }
+        default: {
+            return vec2<u32>(1u, 1u);
+        }
+    }
+}
+
+fn pack_command_origin(origin_pixel: vec2<u32>) -> u32 {
+    return (origin_pixel.x & 0xffffu) | ((origin_pixel.y & 0xffffu) << 16u);
+}
+
+fn unpack_command_origin(packed_origin: u32) -> vec2<u32> {
+    return vec2<u32>(packed_origin & 0xffffu, packed_origin >> 16u);
+}
+
+fn append_shade_command(
+    origin_pixel: vec2<u32>,
+    coverage_size: vec2<u32>,
+) {
+    let command_index = atomicAdd(&shade_command_count.value, 1u);
+    if (command_index >= max_command_count()) {
+        return;
+    }
+
+    shade_commands[command_index] = vec2<u32>(
+        pack_command_origin(origin_pixel),
+        coverage_mode_for_size(coverage_size),
+    );
 }
 
 fn is_uniform_key(base_index: u32, width: u32, height: u32) -> bool {
@@ -528,6 +727,35 @@ fn is_uniform_key(base_index: u32, width: u32, height: u32) -> bool {
     }
 
     return true;
+}
+
+fn coverage_debug_color(origin: vec2<u32>, coverage: vec2<u32>, world_position: vec4<f32>) -> vec3<f32> {
+    let visible = world_position.w > 0.5;
+    if (!visible) {
+        let dimensions = textureDimensions(world_position_texture);
+        let uv = (vec2<f32>(origin) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
+        return debug_background(uv);
+    }
+
+    if (coverage.x == 4u && coverage.y == 4u) {
+        return group_debug_color(vec3<f32>(0.22, 0.82, 0.36), origin / vec2<u32>(4u, 4u));
+    }
+    if (coverage.x == 2u && coverage.y == 2u) {
+        return group_debug_color(vec3<f32>(0.22, 0.58, 0.96), origin / vec2<u32>(2u, 2u));
+    }
+    return per_pixel_debug_color(world_position.xyz, origin);
+}
+
+fn broadcast_command_color(origin: vec2<u32>, coverage: vec2<u32>, color: vec3<f32>) {
+    for (var offset_y = 0u; offset_y < coverage.y; offset_y = offset_y + 1u) {
+        for (var offset_x = 0u; offset_x < coverage.x; offset_x = offset_x + 1u) {
+            textureStore(
+                output_texture,
+                vec2<i32>(origin + vec2<u32>(offset_x, offset_y)),
+                vec4<f32>(color, 1.0),
+            );
+        }
+    }
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -602,6 +830,7 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
     rayQueryInitialize(&query, scene_tlas, ray);
 
     var stored_world_position = vec4<f32>(0.0);
+    var stored_shading_input = vec4<f32>(0.0);
 
     while (rayQueryProceed(&query)) {
         let candidate = rayQueryGetCandidateIntersection(&query);
@@ -627,12 +856,15 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         let local_voxel_center = (vec3<f32>(marched.cell) + vec3<f32>(0.5)) / f32(VOXEL_GRID_DIM);
         let world_position = (candidate.object_to_world * vec4<f32>(local_voxel_center, 1.0)).xyz;
+        let world_normal = normalize((candidate.object_to_world * vec4<f32>(marched.normal, 0.0)).xyz);
         stored_world_position = vec4<f32>(world_position, 1.0);
+        stored_shading_input = vec4<f32>(world_normal, f32(candidate.instance_custom_data));
 
         rayQueryGenerateIntersection(&query, hit_t);
     }
 
     textureStore(world_position_output, vec2<i32>(id.xy), stored_world_position);
+    textureStore(shading_input_output, vec2<i32>(id.xy), stored_shading_input);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -653,14 +885,18 @@ fn visualize_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn visualize_tile_groups_main(
+fn emit_shade_commands_main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) workgroup_id: vec3<u32>,
 ) {
     let dimensions = textureDimensions(world_position_texture);
     let idx = local_index(lid.xy);
     let in_bounds = gid.x < dimensions.x && gid.y < dimensions.y;
+    let workgroup_origin = gid.xy - lid.xy;
+    let block4_id = (lid.y >> 2u) * 2u + (lid.x >> 2u);
+    let block2_id = (lid.y >> 1u) * 4u + (lid.x >> 1u);
+    let in4_index = (lid.y & 3u) * 4u + (lid.x & 3u);
+    let in2_index = (lid.y & 1u) * 2u + (lid.x & 1u);
 
     if (in_bounds) {
         shared_keys[idx] = textureLoad(world_position_texture, vec2<i32>(gid.xy), 0);
@@ -672,34 +908,73 @@ fn visualize_tile_groups_main(
 
     workgroupBarrier();
 
-    let block4_id = (lid.y >> 2u) * 2u + (lid.x >> 2u);
-    let block2_id = (lid.y >> 1u) * 4u + (lid.x >> 1u);
+    let block4_base = base_index_4x4(block4_id);
+    let block2_base = base_index_2x2(block2_id);
+    let block4_uniform = is_uniform_key(block4_base, 4u, 4u);
+    let block2_uniform = !block4_uniform && is_uniform_key(block2_base, 2u, 2u);
 
-    if (!in_bounds) {
+    if (in4_index == 0u && block4_uniform) {
+        let origin = block_origin_from_base_index(workgroup_origin, block4_base);
+        append_shade_command(origin, vec2<u32>(4u, 4u));
         return;
     }
 
-    let block4_is_uniform = is_uniform_key(base_index_4x4(block4_id), 4u, 4u);
-    let block2_is_uniform = is_uniform_key(base_index_2x2(block2_id), 2u, 2u);
-    let key = shared_keys[idx];
-    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
-    let fallback_color = select(
-        debug_background(uv),
-        per_pixel_debug_color(key.xyz, gid.xy),
-        key.w > 0.5,
-    );
-    var color = fallback_color;
-    if (block4_is_uniform) {
-        color = group_debug_color(
-            vec3<f32>(0.16, 0.76, 0.32),
-            vec2<u32>(gid.x >> 2u, gid.y >> 2u),
-        );
-    } else if (block2_is_uniform) {
-        color = group_debug_color(
-            vec3<f32>(0.18, 0.44, 0.96),
-            vec2<u32>(gid.x >> 1u, gid.y >> 1u),
-        );
+    if (in2_index == 0u && block2_uniform) {
+        let origin = block_origin_from_base_index(workgroup_origin, block2_base);
+        append_shade_command(origin, vec2<u32>(2u, 2u));
+        return;
     }
 
-    textureStore(output_texture, vec2<i32>(gid.xy), vec4<f32>(color, 1.0));
+    if (in_bounds && !block4_uniform && !block2_uniform) {
+        append_shade_command(gid.xy, vec2<u32>(1u, 1u));
+    }
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn prepare_shade_dispatch_args_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (any(id != vec3<u32>(0u))) {
+        return;
+    }
+
+    let command_count = atomicLoad(&shade_command_count.value);
+    shade_dispatch_args.x = max(
+        1u,
+        (command_count + SHADE_COMMAND_WORKGROUP_SIZE - 1u) / SHADE_COMMAND_WORKGROUP_SIZE,
+    );
+    shade_dispatch_args.y = 1u;
+    shade_dispatch_args.z = 1u;
+}
+
+fn consume_shade_command(command_index: u32, debug_coverage_only: bool) {
+    let command_count = atomicLoad(&shade_command_count.value);
+    if (command_index >= command_count) {
+        return;
+    }
+
+    let command = shade_commands[command_index];
+    let origin = unpack_command_origin(command.x);
+    let coverage = coverage_size_from_mode(command.y);
+    let world_position = textureLoad(world_position_texture, vec2<i32>(origin), 0);
+    let shading_input = textureLoad(shading_input_texture, vec2<i32>(origin), 0);
+    let color = select(
+        shaded_color(world_position.xyz, shading_input),
+        coverage_debug_color(origin, coverage, world_position),
+        debug_coverage_only,
+    );
+    let final_color = select(
+        color,
+        coverage_debug_color(origin, coverage, world_position),
+        world_position.w <= 0.5,
+    );
+    broadcast_command_color(origin, coverage, final_color);
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn consume_command_coverage_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    consume_shade_command(id.x, true);
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn consume_shade_commands_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    consume_shade_command(id.x, false);
 }
