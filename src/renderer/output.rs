@@ -5,11 +5,15 @@ use std::{
 
 pub(crate) const OUTPUT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub(crate) const COARSE_DEPTH_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+pub(crate) const WORLD_POSITION_TEXTURE_FORMAT: wgpu::TextureFormat =
+    wgpu::TextureFormat::Rgba32Float;
 pub(crate) const COARSE_DEPTH_DIVISOR: u32 = 8;
 
 pub(crate) struct OutputTarget {
     output_texture: wgpu::Texture,
     output_view: wgpu::TextureView,
+    _world_position_texture: wgpu::Texture,
+    world_position_view: wgpu::TextureView,
     _coarse_depth_texture: wgpu::Texture,
     coarse_depth_view: wgpu::TextureView,
     coarse_depth_size: (u32, u32),
@@ -37,6 +41,22 @@ impl OutputTarget {
             view_formats: &[],
         });
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let world_position_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("world position texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORLD_POSITION_TEXTURE_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let world_position_view =
+            world_position_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let coarse_depth_size = coarse_depth_dimensions(width, height);
         let coarse_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("coarse depth texture"),
@@ -58,6 +78,8 @@ impl OutputTarget {
         Self {
             output_texture,
             output_view,
+            _world_position_texture: world_position_texture,
+            world_position_view,
             _coarse_depth_texture: coarse_depth_texture,
             coarse_depth_view,
             coarse_depth_size,
@@ -75,6 +97,10 @@ impl OutputTarget {
 
     pub(crate) fn coarse_depth_view(&self) -> &wgpu::TextureView {
         &self.coarse_depth_view
+    }
+
+    pub(crate) fn world_position_view(&self) -> &wgpu::TextureView {
+        &self.world_position_view
     }
 
     pub(crate) fn coarse_depth_size(&self) -> (u32, u32) {

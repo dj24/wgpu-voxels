@@ -40,6 +40,13 @@ struct PresentationPasses {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
+struct DebugVisualizationParams {
+    world_min: [f32; 4],
+    world_extent: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct FrameParams {
     time_seconds: f32,
     object_count: u32,
@@ -51,6 +58,7 @@ pub(crate) struct Renderer {
     context: GpuContext,
     camera: Camera,
     camera_buffer: wgpu::Buffer,
+    debug_visualization_buffer: wgpu::Buffer,
     frame_params_buffer: wgpu::Buffer,
     voxel_mask_buffer: wgpu::Buffer,
     object_count: u32,
@@ -91,6 +99,7 @@ impl Renderer {
         let camera = Camera::new();
         let object_count = all_objects.len() as u32;
         let size = context.current_size();
+        let debug_visualization = debug_visualization_params(all_objects);
         let camera_buffer = context
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -98,6 +107,14 @@ impl Renderer {
                 contents: bytemuck::bytes_of(&camera.to_uniform(size)),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+        let debug_visualization_buffer =
+            context
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("debug visualization buffer"),
+                    contents: bytemuck::bytes_of(&debug_visualization),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
         let frame_params_buffer =
             context
                 .device
@@ -136,9 +153,11 @@ impl Renderer {
         let compute_pass = ComputeVoxelsPass::new(
             &context.device,
             output_target.view(),
+            output_target.world_position_view(),
             output_target.coarse_depth_view(),
             procedural_scene.tlas(),
             &camera_buffer,
+            &debug_visualization_buffer,
             &voxel_mask_buffer,
         );
         let presentation = context.window.as_ref().map(|_| PresentationPasses {
@@ -150,6 +169,7 @@ impl Renderer {
             context,
             camera,
             camera_buffer,
+            debug_visualization_buffer,
             frame_params_buffer,
             voxel_mask_buffer,
             object_count,
@@ -193,9 +213,11 @@ impl Renderer {
         self.compute_pass.rebind(
             &self.context.device,
             self.output_target.view(),
+            self.output_target.world_position_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,
+            &self.debug_visualization_buffer,
             &self.voxel_mask_buffer,
         );
         Ok(())
@@ -321,9 +343,11 @@ impl Renderer {
         self.compute_pass.rebind(
             &self.context.device,
             self.output_target.view(),
+            self.output_target.world_position_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,
+            &self.debug_visualization_buffer,
             &self.voxel_mask_buffer,
         );
         if let Some(presentation) = self.presentation.as_mut() {
@@ -367,5 +391,59 @@ impl Renderer {
 
         self.last_voxel_update_at = Some(now);
         true
+    }
+}
+
+fn debug_visualization_params(all_objects: &[RenderObject]) -> DebugVisualizationParams {
+    let mut world_min = [
+        OBJECT_BOUNDS_MIN[0],
+        OBJECT_BOUNDS_MIN[1],
+        OBJECT_BOUNDS_MIN[2],
+    ];
+    let mut world_max = [
+        OBJECT_BOUNDS_MAX[0],
+        OBJECT_BOUNDS_MAX[1],
+        OBJECT_BOUNDS_MAX[2],
+    ];
+
+    if let Some(first) = all_objects.first() {
+        world_min = [
+            first.position[0] + OBJECT_BOUNDS_MIN[0],
+            first.position[1] + OBJECT_BOUNDS_MIN[1],
+            first.position[2] + OBJECT_BOUNDS_MIN[2],
+        ];
+        world_max = [
+            first.position[0] + OBJECT_BOUNDS_MAX[0],
+            first.position[1] + OBJECT_BOUNDS_MAX[1],
+            first.position[2] + OBJECT_BOUNDS_MAX[2],
+        ];
+
+        for object in &all_objects[1..] {
+            let object_min = [
+                object.position[0] + OBJECT_BOUNDS_MIN[0],
+                object.position[1] + OBJECT_BOUNDS_MIN[1],
+                object.position[2] + OBJECT_BOUNDS_MIN[2],
+            ];
+            let object_max = [
+                object.position[0] + OBJECT_BOUNDS_MAX[0],
+                object.position[1] + OBJECT_BOUNDS_MAX[1],
+                object.position[2] + OBJECT_BOUNDS_MAX[2],
+            ];
+
+            for axis in 0..3 {
+                world_min[axis] = world_min[axis].min(object_min[axis]);
+                world_max[axis] = world_max[axis].max(object_max[axis]);
+            }
+        }
+    }
+
+    DebugVisualizationParams {
+        world_min: [world_min[0], world_min[1], world_min[2], 0.0],
+        world_extent: [
+            (world_max[0] - world_min[0]).max(1e-5),
+            (world_max[1] - world_min[1]).max(1e-5),
+            (world_max[2] - world_min[2]).max(1e-5),
+            0.0,
+        ],
     }
 }
