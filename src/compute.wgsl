@@ -797,6 +797,8 @@ fn broadcast_command_color(origin: vec2<u32>, coverage: vec2<u32>, color: vec3<f
     }
 }
 
+const HEATMAP_UV_X_THRESHOLD = 0.0;
+
 fn broadcast_heatmap_command(
     origin: vec2<u32>,
     coverage: vec2<u32>,
@@ -821,7 +823,7 @@ fn broadcast_heatmap_command(
             let background = debug_background(uv);
             let left_color = select(background, heatmap_color, has_debug);
             let right_color = select(background, shaded, visible);
-            let color = select(left_color, right_color, uv.x >= 0.5);
+            let color = select(left_color, right_color, uv.x >= HEATMAP_UV_X_THRESHOLD);
             textureStore(output_texture, vec2<i32>(pixel), vec4<f32>(color, 1.0));
         }
     }
