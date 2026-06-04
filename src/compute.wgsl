@@ -649,7 +649,7 @@ fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
 
 fn shaded_color(world_position: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32> {
     let visibility = sun_visibility(world_position, shading_input.xyz);
-    return shade_from_input(shading_input) * visibility;
+    return shade_from_input(shading_input) * mix(visibility, 1.0, 0.15);
 }
 
 fn encoded_step_count(world_position: vec4<f32>) -> u32 {
