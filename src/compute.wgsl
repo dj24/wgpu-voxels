@@ -94,7 +94,7 @@ const OCCUPANCY_WORD_COUNT_U32: u32 = 8210u;
 const MAX_RAY_MARCH_STEPS: u32 = 512u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
-const COARSE_DEPTH_BIAS_SCALE: f32 = 1.7320508;
+const COARSE_DEPTH_BIAS_SCALE: f32 = 0.0;
 const SHADOW_RAY_T_MIN: f32 = 0.001;
 const SHADOW_RAY_T_MAX: f32 = 100.0;
 const SHADE_COMMAND_WORKGROUP_SIZE: u32 = 64u;
@@ -797,7 +797,7 @@ fn broadcast_command_color(origin: vec2<u32>, coverage: vec2<u32>, color: vec3<f
     }
 }
 
-const HEATMAP_UV_X_THRESHOLD = 1.0;
+const HEATMAP_UV_X_THRESHOLD = 0.0;
 
 fn broadcast_heatmap_command(
     origin: vec2<u32>,
@@ -890,11 +890,7 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray_direction = compute_camera_ray_direction(uv);
     let coarse_depth = sample_min_coarse_depth(uv);
     let coarse_depth_bias = voxel_size() * f32(REGION_AXIS) * COARSE_DEPTH_BIAS_SCALE;
-    let ray_t_min = select(
-        0.01,
-        clamp(coarse_depth - coarse_depth_bias, 0.01, 99.999),
-        coarse_depth > 0.0,
-    );
+    let ray_t_min = max(coarse_depth - coarse_depth_bias, 0.01);
 
     var query: ray_query;
     let ray = RayDesc(0u, 0xffu, ray_t_min, 100.0, ray_origin, ray_direction);
