@@ -22,9 +22,10 @@ enum VisualizationMode {
     WorldPosition,
     CommandCoverage,
     TileGroups,
+    Heatmap,
 }
 
-const DEFAULT_VISUALIZATION_MODE: VisualizationMode = VisualizationMode::TileGroups;
+const DEFAULT_VISUALIZATION_MODE: VisualizationMode = VisualizationMode::Heatmap;
 
 pub(crate) struct ComputeVoxelsPass {
     coarse_depth_bind_group_layout: wgpu::BindGroupLayout,
@@ -39,6 +40,7 @@ pub(crate) struct ComputeVoxelsPass {
     prepare_shade_dispatch_args_pipeline: wgpu::ComputePipeline,
     consume_command_coverage_pipeline: wgpu::ComputePipeline,
     consume_shade_commands_pipeline: wgpu::ComputePipeline,
+    consume_heatmap_pipeline: wgpu::ComputePipeline,
     shade_command_count_buffer: wgpu::Buffer,
     shade_command_buffer: wgpu::Buffer,
     shade_dispatch_args_buffer: wgpu::Buffer,
@@ -393,6 +395,15 @@ impl ComputeVoxelsPass {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
+        let consume_heatmap_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("consume heatmap pipeline"),
+                layout: Some(&visualize_pipeline_layout),
+                module: &shader,
+                entry_point: Some("consume_heatmap_commands_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
 
         let coarse_depth_bind_group = Self::create_coarse_depth_bind_group(
             device,
@@ -448,6 +459,7 @@ impl ComputeVoxelsPass {
             prepare_shade_dispatch_args_pipeline,
             consume_command_coverage_pipeline,
             consume_shade_commands_pipeline,
+            consume_heatmap_pipeline,
             shade_command_count_buffer: shade_command_resources.count_buffer,
             shade_command_buffer: shade_command_resources.command_buffer,
             shade_dispatch_args_buffer: shade_command_resources.dispatch_args_buffer,
@@ -607,6 +619,7 @@ impl ComputeVoxelsPass {
             VisualizationMode::WorldPosition => unreachable!(),
             VisualizationMode::CommandCoverage => &self.consume_command_coverage_pipeline,
             VisualizationMode::TileGroups => &self.consume_shade_commands_pipeline,
+            VisualizationMode::Heatmap => &self.consume_heatmap_pipeline,
         });
         consume_pass.set_bind_group(0, &self.visualize_scene_bind_group, &[]);
         consume_pass.set_bind_group(1, &self.visualize_bind_group, &[]);

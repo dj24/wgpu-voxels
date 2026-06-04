@@ -7,10 +7,10 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, WindowEvent},
+    event::{DeviceEvent, ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
-    window::{Window, WindowId},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
 mod renderer;
@@ -141,7 +141,7 @@ impl Default for App {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct InputState {
     pub(crate) forward: bool,
     pub(crate) backward: bool,
@@ -149,10 +149,8 @@ pub(crate) struct InputState {
     pub(crate) right: bool,
     pub(crate) up: bool,
     pub(crate) down: bool,
-    pub(crate) turn_left: bool,
-    pub(crate) turn_right: bool,
-    pub(crate) look_up: bool,
-    pub(crate) look_down: bool,
+    pub(crate) mouse_delta_x: f32,
+    pub(crate) mouse_delta_y: f32,
 }
 
 impl InputState {
@@ -164,12 +162,20 @@ impl InputState {
             KeyCode::KeyD => self.right = pressed,
             KeyCode::Space => self.up = pressed,
             KeyCode::ShiftLeft => self.down = pressed,
-            KeyCode::ArrowLeft => self.turn_left = pressed,
-            KeyCode::ArrowRight => self.turn_right = pressed,
-            KeyCode::ArrowUp => self.look_up = pressed,
-            KeyCode::ArrowDown => self.look_down = pressed,
             _ => {}
         }
+    }
+
+    fn add_mouse_delta(&mut self, delta_x: f64, delta_y: f64) {
+        self.mouse_delta_x += delta_x as f32;
+        self.mouse_delta_y += delta_y as f32;
+    }
+
+    fn take_mouse_delta(&mut self) -> (f32, f32) {
+        let delta = (self.mouse_delta_x, self.mouse_delta_y);
+        self.mouse_delta_x = 0.0;
+        self.mouse_delta_y = 0.0;
+        delta
     }
 }
 
@@ -179,7 +185,9 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let window_attributes = Window::default_attributes().with_title("wgpu UV Compute");
+        let window_attributes = Window::default_attributes()
+            .with_title("wgpu UV Compute")
+            .with_inner_size(PhysicalSize::new(1920, 1080));
         let window = match event_loop.create_window(window_attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -192,6 +200,16 @@ impl ApplicationHandler for App {
         let objects = collect_active_render_objects(&self.world);
         match pollster::block_on(Renderer::new(window, &objects)) {
             Ok(renderer) => {
+                let window = renderer.window();
+                window.set_cursor_visible(false);
+                if let Err(error) = window.set_cursor_grab(CursorGrabMode::Locked) {
+                    if let Err(confined_error) = window.set_cursor_grab(CursorGrabMode::Confined)
+                    {
+                        eprintln!(
+                            "failed to grab cursor: {error}; fallback failed: {confined_error}"
+                        );
+                    }
+                }
                 self.renderer = Some(renderer);
                 self.last_frame_at = Some(Instant::now());
             }
@@ -251,6 +269,21 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if self.renderer.is_none() {
+            return;
+        }
+
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.input.add_mouse_delta(delta.0, delta.1);
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -258,7 +291,11 @@ impl ApplicationHandler for App {
             let now = Instant::now();
             let previous = self.last_frame_at.replace(now).unwrap_or(now);
             let delta_seconds = (now - previous).as_secs_f32();
-            renderer.update_camera(&self.input, delta_seconds);
+            let (mouse_delta_x, mouse_delta_y) = self.input.take_mouse_delta();
+            let mut frame_input = self.input;
+            frame_input.mouse_delta_x = mouse_delta_x;
+            frame_input.mouse_delta_y = mouse_delta_y;
+            renderer.update_camera(&frame_input, delta_seconds);
             let scene_snapshot = advance_chunk_loading(&mut self.world);
             if scene_snapshot != self.scene_snapshot {
                 let active_objects = collect_active_render_objects(&self.world);

@@ -133,6 +133,13 @@ impl Renderer {
         self.context.window_id()
     }
 
+    pub(crate) fn window(&self) -> &Arc<Window> {
+        self.context
+            .window
+            .as_ref()
+            .expect("window requested for headless renderer")
+    }
+
     pub(crate) fn request_redraw(&self) {
         self.context.request_redraw();
     }

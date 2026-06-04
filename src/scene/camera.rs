@@ -54,7 +54,7 @@ impl Camera {
 
         let basis = self.basis();
         let movement_speed = 4.5;
-        let look_speed = 1.2;
+        let look_sensitivity = 0.0035;
         let mut movement = Vec3::ZERO;
 
         if input.forward {
@@ -80,10 +80,8 @@ impl Camera {
             self.position += movement.normalize() * movement_speed * delta_seconds;
         }
 
-        let yaw_delta = (input.turn_left as i32 - input.turn_right as i32) as f32;
-        let pitch_delta = (input.look_down as i32 - input.look_up as i32) as f32;
-        self.yaw += -yaw_delta * look_speed * delta_seconds;
-        self.pitch = (self.pitch + pitch_delta * look_speed * delta_seconds).clamp(-1.3, 1.3);
+        self.yaw -= input.mouse_delta_x * look_sensitivity;
+        self.pitch = (self.pitch - input.mouse_delta_y * look_sensitivity).clamp(-1.3, 1.3);
     }
 
     fn basis(&self) -> CameraBasis {
@@ -129,11 +127,11 @@ mod tests {
     fn pitch_is_clamped() {
         let mut camera = Camera::new();
         let input = InputState {
-            look_down: true,
+            mouse_delta_y: -10_000.0,
             ..InputState::default()
         };
 
-        camera.update(&input, 10.0);
+        camera.update(&input, 1.0);
 
         assert!(camera.pitch <= 1.3);
     }

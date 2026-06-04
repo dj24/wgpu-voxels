@@ -18,6 +18,7 @@ struct RayMarch {
     t: f32,
     normal: vec3<f32>,
     cell: vec3<i32>,
+    step_count: u32,
 }
 
 struct BoxIntersection {
@@ -103,6 +104,26 @@ var<workgroup> shared_valid: array<u32, 64>;
 
 fn saturate(value: f32) -> f32 {
     return clamp(value, 0.0, 1.0);
+}
+
+fn heatmap_ramp(t: f32) -> vec3<f32> {
+    let cool = vec3<f32>(0.04, 0.05, 0.08);
+    let blue = vec3<f32>(0.05, 0.32, 0.95);
+    let cyan = vec3<f32>(0.05, 0.9, 0.95);
+    let yellow = vec3<f32>(1.0, 0.9, 0.15);
+    let hot = vec3<f32>(1.0, 0.18, 0.08);
+    let ramp_t = saturate(t);
+
+    if (ramp_t < 0.25) {
+        return mix(cool, blue, ramp_t / 0.25);
+    }
+    if (ramp_t < 0.5) {
+        return mix(blue, cyan, (ramp_t - 0.25) / 0.25);
+    }
+    if (ramp_t < 0.75) {
+        return mix(cyan, yellow, (ramp_t - 0.5) / 0.25);
+    }
+    return mix(yellow, hot, (ramp_t - 0.75) / 0.25);
 }
 
 fn palette(index: u32) -> vec3<f32> {
@@ -323,7 +344,7 @@ fn intersect_voxel_object(
     );
 
     if (!box_hit.hit) {
-        return RayMarch(false, ray_t_max, vec3<f32>(0.0), vec3<i32>(-1));
+        return RayMarch(false, ray_t_max, vec3<f32>(0.0), vec3<i32>(-1), 0u);
     }
 
     var t_enter = box_hit.t_enter;
@@ -479,7 +500,7 @@ fn intersect_voxel_object(
                 normalize(gradient),
                 length(gradient) > 1e-5,
             );
-            return RayMarch(true, max(t_enter, ray_t_min), local_normal, cell);
+            return RayMarch(true, max(t_enter, ray_t_min), local_normal, cell, step_count);
         }
 
         if (t_max.x < t_max.y && t_max.x < t_max.z) {
@@ -501,7 +522,7 @@ fn intersect_voxel_object(
         }
     }
 
-    return RayMarch(false, t_exit, vec3<f32>(0.0), vec3<i32>(-1));
+    return RayMarch(false, t_exit, vec3<f32>(0.0), vec3<i32>(-1), step_count);
 }
 
 fn compute_camera_ray_direction(uv: vec2<f32>) -> vec3<f32> {
@@ -631,6 +652,24 @@ fn shaded_color(world_position: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32
     return shade_from_input(shading_input) * visibility;
 }
 
+fn encoded_step_count(world_position: vec4<f32>) -> u32 {
+    return u32(max(abs(world_position.w) - 1.0, 0.0));
+}
+
+fn has_heatmap_debug(world_position: vec4<f32>) -> bool {
+    return abs(world_position.w) > 0.5;
+}
+
+fn is_visible_surface(world_position: vec4<f32>) -> bool {
+    return world_position.w > 0.5;
+}
+
+fn shade_ray_complexity(base_color: vec3<f32>, step_count: u32) -> vec3<f32> {
+    let normalized_steps = saturate(log2(f32(step_count) + 1.0) / log2(f32(MAX_RAY_MARCH_STEPS) + 1.0));
+    let heatmap = heatmap_ramp(normalized_steps);
+    return mix(base_color * 0.18, heatmap, 0.88);
+}
+
 fn local_index(local_id: vec2<u32>) -> u32 {
     return local_id.y * 8u + local_id.x;
 }
@@ -730,7 +769,7 @@ fn is_uniform_key(base_index: u32, width: u32, height: u32) -> bool {
 }
 
 fn coverage_debug_color(origin: vec2<u32>, coverage: vec2<u32>, world_position: vec4<f32>) -> vec3<f32> {
-    let visible = world_position.w > 0.5;
+    let visible = is_visible_surface(world_position);
     if (!visible) {
         let dimensions = textureDimensions(world_position_texture);
         let uv = (vec2<f32>(origin) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
@@ -754,6 +793,36 @@ fn broadcast_command_color(origin: vec2<u32>, coverage: vec2<u32>, color: vec3<f
                 vec2<i32>(origin + vec2<u32>(offset_x, offset_y)),
                 vec4<f32>(color, 1.0),
             );
+        }
+    }
+}
+
+fn broadcast_heatmap_command(
+    origin: vec2<u32>,
+    coverage: vec2<u32>,
+    world_position: vec4<f32>,
+    shading_input: vec4<f32>,
+) {
+    let dimensions = textureDimensions(world_position_texture);
+    let has_debug = has_heatmap_debug(world_position);
+    let visible = is_visible_surface(world_position);
+    let base_color = palette(u32(max(shading_input.w, 0.0)));
+    let heatmap_color = shade_ray_complexity(base_color, encoded_step_count(world_position));
+    let shaded = select(
+        vec3<f32>(0.0),
+        shaded_color(world_position.xyz, shading_input),
+        visible,
+    );
+
+    for (var offset_y = 0u; offset_y < coverage.y; offset_y = offset_y + 1u) {
+        for (var offset_x = 0u; offset_x < coverage.x; offset_x = offset_x + 1u) {
+            let pixel = origin + vec2<u32>(offset_x, offset_y);
+            let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
+            let background = debug_background(uv);
+            let left_color = select(background, heatmap_color, has_debug);
+            let right_color = select(background, shaded, visible);
+            let color = select(left_color, right_color, uv.x >= 0.5);
+            textureStore(output_texture, vec2<i32>(pixel), vec4<f32>(color, 1.0));
         }
     }
 }
@@ -831,6 +900,10 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var stored_world_position = vec4<f32>(0.0);
     var stored_shading_input = vec4<f32>(0.0);
+    var accumulated_step_count = 0u;
+    var closest_debug_t = ray.tmax;
+    var closest_debug_step_count = 0u;
+    var closest_debug_object_index = 0u;
 
     while (rayQueryProceed(&query)) {
         let candidate = rayQueryGetCandidateIntersection(&query);
@@ -849,18 +922,29 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
             candidate.instance_custom_data,
         );
         let hit_t = marched.t;
+        accumulated_step_count = accumulated_step_count + marched.step_count;
 
         if (!marched.hit) {
+            if (marched.step_count > 0u && marched.t < closest_debug_t) {
+                closest_debug_t = marched.t;
+                closest_debug_step_count = marched.step_count;
+                closest_debug_object_index = candidate.instance_custom_data;
+            }
             continue;
         }
 
         let local_voxel_center = (vec3<f32>(marched.cell) + vec3<f32>(0.5)) / f32(VOXEL_GRID_DIM);
         let world_position = (candidate.object_to_world * vec4<f32>(local_voxel_center, 1.0)).xyz;
         let world_normal = normalize((candidate.object_to_world * vec4<f32>(marched.normal, 0.0)).xyz);
-        stored_world_position = vec4<f32>(world_position, 1.0);
+        stored_world_position = vec4<f32>(world_position, f32(accumulated_step_count) + 1.0);
         stored_shading_input = vec4<f32>(world_normal, f32(candidate.instance_custom_data));
 
         rayQueryGenerateIntersection(&query, hit_t);
+    }
+
+    if (!is_visible_surface(stored_world_position) && closest_debug_step_count > 0u) {
+        stored_world_position = vec4<f32>(0.0, 0.0, 0.0, -(f32(closest_debug_step_count) + 1.0));
+        stored_shading_input = vec4<f32>(0.0, 0.0, 0.0, f32(closest_debug_object_index));
     }
 
     textureStore(world_position_output, vec2<i32>(id.xy), stored_world_position);
@@ -964,9 +1048,23 @@ fn consume_shade_command(command_index: u32, debug_coverage_only: bool) {
     let final_color = select(
         color,
         coverage_debug_color(origin, coverage, world_position),
-        world_position.w <= 0.5,
+        !is_visible_surface(world_position),
     );
     broadcast_command_color(origin, coverage, final_color);
+}
+
+fn consume_heatmap_command(command_index: u32) {
+    let command_count = atomicLoad(&shade_command_count.value);
+    if (command_index >= command_count) {
+        return;
+    }
+
+    let command = shade_commands[command_index];
+    let origin = unpack_command_origin(command.x);
+    let coverage = coverage_size_from_mode(command.y);
+    let world_position = textureLoad(world_position_texture, vec2<i32>(origin), 0);
+    let shading_input = textureLoad(shading_input_texture, vec2<i32>(origin), 0);
+    broadcast_heatmap_command(origin, coverage, world_position, shading_input);
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -977,4 +1075,9 @@ fn consume_command_coverage_main(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(64, 1, 1)
 fn consume_shade_commands_main(@builtin(global_invocation_id) id: vec3<u32>) {
     consume_shade_command(id.x, false);
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn consume_heatmap_commands_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    consume_heatmap_command(id.x);
 }
