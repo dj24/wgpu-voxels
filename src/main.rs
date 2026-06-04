@@ -18,7 +18,7 @@ mod scene;
 
 use renderer::Renderer;
 use scene::{
-    ActiveSceneSnapshot, SceneWorld, advance_spawning, build_scene_world,
+    ActiveSceneSnapshot, SceneWorld, advance_chunk_loading, build_scene_world,
     collect_active_render_objects, collect_all_render_objects,
 };
 
@@ -42,9 +42,8 @@ fn run_headless(output_path: &Path, delay: Duration) -> Result<(), Box<dyn std::
     const DEFAULT_CAPTURE_SIZE: PhysicalSize<u32> = PhysicalSize::new(1280, 720);
 
     let world = build_scene_world();
-    let all_objects = collect_all_render_objects(&world);
-    let mut renderer =
-        pollster::block_on(Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &all_objects, &all_objects))?;
+    let objects = collect_all_render_objects(&world);
+    let mut renderer = pollster::block_on(Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &objects))?;
     std::thread::sleep(delay);
     renderer.render_headless()?;
     renderer.save_headless_png(output_path)?;
@@ -90,7 +89,9 @@ where
             }
             "--delay-ms" => {
                 let Some(raw_delay) = args.next() else {
-                    return Err(String::from("expected a millisecond value after --delay-ms"));
+                    return Err(String::from(
+                        "expected a millisecond value after --delay-ms",
+                    ));
                 };
                 let parsed_delay = raw_delay
                     .parse::<u64>()
@@ -128,14 +129,12 @@ struct App {
 impl Default for App {
     fn default() -> Self {
         let world = build_scene_world();
-        let scene_snapshot = ActiveSceneSnapshot {
-            active_count: collect_active_render_objects(&world).len(),
-        };
-
         Self {
             renderer: None,
+            scene_snapshot: ActiveSceneSnapshot {
+                active_count: collect_active_render_objects(&world).len(),
+            },
             world,
-            scene_snapshot,
             input: InputState::default(),
             last_frame_at: None,
         }
@@ -190,9 +189,8 @@ impl ApplicationHandler for App {
             }
         };
 
-        let all_objects = collect_all_render_objects(&self.world);
-        let active_objects = collect_active_render_objects(&self.world);
-        match pollster::block_on(Renderer::new(window, &all_objects, &active_objects)) {
+        let objects = collect_active_render_objects(&self.world);
+        match pollster::block_on(Renderer::new(window, &objects)) {
             Ok(renderer) => {
                 self.renderer = Some(renderer);
                 self.last_frame_at = Some(Instant::now());
@@ -261,15 +259,15 @@ impl ApplicationHandler for App {
             let previous = self.last_frame_at.replace(now).unwrap_or(now);
             let delta_seconds = (now - previous).as_secs_f32();
             renderer.update_camera(&self.input, delta_seconds);
-            let new_snapshot = advance_spawning(&mut self.world, delta_seconds);
-            if new_snapshot != self.scene_snapshot {
+            let scene_snapshot = advance_chunk_loading(&mut self.world);
+            if scene_snapshot != self.scene_snapshot {
                 let active_objects = collect_active_render_objects(&self.world);
                 if let Err(error) = renderer.sync_scene(&active_objects) {
                     eprintln!("scene sync error: {error}");
                     event_loop.exit();
                     return;
                 }
-                self.scene_snapshot = new_snapshot;
+                self.scene_snapshot = scene_snapshot;
             }
             renderer.request_redraw();
         }

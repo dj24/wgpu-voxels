@@ -160,7 +160,9 @@ impl GpuContext {
 
     pub(crate) fn acquire_frame(&mut self) -> Result<Option<SurfaceTexture>, String> {
         let Some(surface_config) = self.surface_config.as_ref() else {
-            return Err(String::from("cannot acquire a frame from a headless context"));
+            return Err(String::from(
+                "cannot acquire a frame from a headless context",
+            ));
         };
         let Some(surface) = self.surface.as_ref() else {
             return Err(String::from("surface missing for windowed context"));

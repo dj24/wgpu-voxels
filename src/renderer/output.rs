@@ -1,7 +1,4 @@
-use std::{
-    path::Path,
-    sync::mpsc,
-};
+use std::{path::Path, sync::mpsc};
 
 pub(crate) const OUTPUT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub(crate) const COARSE_DEPTH_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -184,8 +181,7 @@ impl OutputTarget {
             .map_err(|error| format!("receive readback result: {error}"))??;
 
         let mapped = slice.get_mapped_range();
-        let mut pixels =
-            Vec::with_capacity((self.size.0 * self.size.1 * bytes_per_pixel) as usize);
+        let mut pixels = Vec::with_capacity((self.size.0 * self.size.1 * bytes_per_pixel) as usize);
         for padded_row in mapped.chunks(padded_bytes_per_row as usize) {
             pixels.extend_from_slice(&padded_row[..unpadded_bytes_per_row as usize]);
         }

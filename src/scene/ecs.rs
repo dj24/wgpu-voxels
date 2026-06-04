@@ -13,24 +13,22 @@ pub(crate) struct RenderObject {
 }
 
 #[derive(Component, Clone, Copy)]
-struct SphereObject {
+struct ChunkObject {
     position: [f32; 3],
     object_index: u32,
 }
 
 #[derive(Component)]
-struct Spawned;
-
-#[derive(Resource)]
-struct SpawnProgress {
-    next_index: usize,
-    interval_seconds: f32,
-    accumulated_seconds: f32,
-}
+struct Loaded;
 
 #[derive(Resource)]
 struct SceneOrder {
     entities: Vec<Entity>,
+}
+
+#[derive(Resource)]
+struct LoadProgress {
+    next_index: usize,
 }
 
 pub(crate) type SceneWorld = World;
@@ -40,11 +38,8 @@ pub(crate) struct ActiveSceneSnapshot {
     pub active_count: usize,
 }
 
-// Keep the packed scene under the current compute dispatch limit:
-// object_count * VOXEL_GRID_DIM / workgroup_size_z must stay <= 65535.
 const GRID_DIMENSION: usize = 26;
 const GRID_LAYERS: usize = 3;
-const SPAWN_INTERVAL_SECONDS: f32 = 0.001;
 
 pub(crate) fn build_scene_world() -> SceneWorld {
     let mut world = World::new();
@@ -60,7 +55,7 @@ pub(crate) fn build_scene_world() -> SceneWorld {
         for z in 0..GRID_DIMENSION {
             for x in 0..GRID_DIMENSION {
                 let index = entities.len() as u32;
-                let mut entity = world.spawn(SphereObject {
+                let mut entity = world.spawn(ChunkObject {
                     position: [
                         x as f32 * object_extent_x - center_offset_x,
                         y as f32 * object_extent_y - center_offset_y,
@@ -70,7 +65,7 @@ pub(crate) fn build_scene_world() -> SceneWorld {
                 });
 
                 if index == 0 {
-                    entity.insert(Spawned);
+                    entity.insert(Loaded);
                 }
 
                 entities.push(entity.id());
@@ -79,44 +74,8 @@ pub(crate) fn build_scene_world() -> SceneWorld {
     }
 
     world.insert_resource(SceneOrder { entities });
-    world.insert_resource(SpawnProgress {
-        next_index: 1,
-        interval_seconds: SPAWN_INTERVAL_SECONDS,
-        accumulated_seconds: 0.0,
-    });
-
+    world.insert_resource(LoadProgress { next_index: 1 });
     world
-}
-
-pub(crate) fn advance_spawning(world: &mut SceneWorld, delta_seconds: f32) -> ActiveSceneSnapshot {
-    let mut snapshot = snapshot(world);
-    if delta_seconds <= 0.0 {
-        return snapshot;
-    }
-
-    let entity_to_spawn = {
-        let (entity_count, entities) = {
-            let order = world.resource::<SceneOrder>();
-            (order.entities.len(), order.entities.clone())
-        };
-        let mut progress = world.resource_mut::<SpawnProgress>();
-        progress.accumulated_seconds += delta_seconds;
-
-        if progress.accumulated_seconds < progress.interval_seconds
-            || progress.next_index >= entity_count
-        {
-            return snapshot;
-        }
-
-        progress.accumulated_seconds -= progress.interval_seconds;
-        let entity = entities[progress.next_index];
-        progress.next_index += 1;
-        entity
-    };
-
-    world.entity_mut(entity_to_spawn).insert(Spawned);
-    snapshot.active_count += 1;
-    snapshot
 }
 
 pub(crate) fn collect_all_render_objects(world: &SceneWorld) -> Vec<RenderObject> {
@@ -127,20 +86,40 @@ pub(crate) fn collect_active_render_objects(world: &SceneWorld) -> Vec<RenderObj
     collect_render_objects(world, false)
 }
 
-fn collect_render_objects(world: &SceneWorld, include_unspawned: bool) -> Vec<RenderObject> {
+pub(crate) fn advance_chunk_loading(world: &mut SceneWorld) -> ActiveSceneSnapshot {
+    let entities = world.resource::<SceneOrder>().entities.clone();
+    let total_count = entities.len();
+    let next_entity = {
+        let mut progress = world.resource_mut::<LoadProgress>();
+        if progress.next_index >= total_count {
+            return snapshot(world);
+        }
+
+        let entity = entities[progress.next_index];
+        progress.next_index += 1;
+        entity
+    };
+
+    world.entity_mut(next_entity).insert(Loaded);
+    ActiveSceneSnapshot {
+        active_count: world.resource::<LoadProgress>().next_index,
+    }
+}
+
+fn collect_render_objects(world: &SceneWorld, include_unloaded: bool) -> Vec<RenderObject> {
     let order = &world.resource::<SceneOrder>().entities;
     let mut objects = Vec::with_capacity(order.len());
 
     for &entity in order {
         let entity_ref = world.entity(entity);
-        if !include_unspawned && !entity_ref.contains::<Spawned>() {
+        if !include_unloaded && !entity_ref.contains::<Loaded>() {
             continue;
         }
 
-        let sphere = entity_ref.get::<SphereObject>().expect("sphere object");
+        let chunk = entity_ref.get::<ChunkObject>().expect("chunk object");
         objects.push(RenderObject {
-            position: sphere.position,
-            object_index: sphere.object_index,
+            position: chunk.position,
+            object_index: chunk.object_index,
         });
     }
 
@@ -150,5 +129,34 @@ fn collect_render_objects(world: &SceneWorld, include_unspawned: bool) -> Vec<Re
 fn snapshot(world: &SceneWorld) -> ActiveSceneSnapshot {
     ActiveSceneSnapshot {
         active_count: collect_active_render_objects(world).len(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ActiveSceneSnapshot, advance_chunk_loading, build_scene_world,
+        collect_active_render_objects,
+    };
+
+    #[test]
+    fn world_starts_with_one_loaded_chunk() {
+        let world = build_scene_world();
+        let active_objects = collect_active_render_objects(&world);
+
+        assert_eq!(active_objects.len(), 1);
+        assert_eq!(active_objects[0].object_index, 0);
+    }
+
+    #[test]
+    fn loading_advances_one_chunk_at_a_time() {
+        let mut world = build_scene_world();
+
+        let first = advance_chunk_loading(&mut world);
+        let second = advance_chunk_loading(&mut world);
+
+        assert_eq!(first, ActiveSceneSnapshot { active_count: 2 });
+        assert_eq!(second, ActiveSceneSnapshot { active_count: 3 });
+        assert_eq!(collect_active_render_objects(&world).len(), 3);
     }
 }

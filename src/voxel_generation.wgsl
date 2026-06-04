@@ -1,50 +1,36 @@
-struct FrameParams {
-    time_seconds: f32,
-    object_count: u32,
+struct GenerationParams {
+    active_object_count: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
+}
+
+struct ChunkGenerationObject {
+    chunk_origin: vec4<f32>,
+    object_index: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0)
 var<storage, read_write> voxel_occupancy: array<atomic<u32>>;
 
 @group(0) @binding(1)
-var<uniform> frame_params: FrameParams;
+var<storage, read> chunk_objects: array<ChunkGenerationObject>;
+
+@group(0) @binding(2)
+var<uniform> generation_params: GenerationParams;
 
 const VOXEL_GRID_DIM_U32: u32 = 64u;
 const REGION_AXIS_U32: u32 = 8u;
+const COARSE_REGION_AXIS_U32: u32 = 4u;
 const MASK_WORD_BITS_U32: u32 = 32u;
 const MASK_WORD_COUNT_U32: u32 = 16u;
 const COARSE_MASK_WORD_OFFSET_U32: u32 = 16u;
 const LEAF_MASK_WORD_OFFSET_U32: u32 = 18u;
 const OCCUPANCY_WORD_COUNT_U32: u32 = 8210u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(1.0, 1.0,1.0);
-const HALF_PI: f32 = 1.5707963;
-
-fn sd_torus(point: vec3<f32>, radii: vec2<f32>) -> f32 {
-    let q = vec2<f32>(length(point.xz) - radii.x, point.y);
-    return length(q) - radii.y;
-}
-
-fn rotate_y(point: vec3<f32>, angle: f32) -> vec3<f32> {
-    let s = sin(angle);
-    let c = cos(angle);
-    return vec3<f32>(c * point.x + s * point.z, point.y, -s * point.x + c * point.z);
-}
-
-fn rotate_z(point: vec3<f32>, angle: f32) -> vec3<f32> {
-    let s = sin(angle);
-    let c = cos(angle);
-    return vec3<f32>(c * point.x - s * point.y, s * point.x + c * point.y, point.z);
-}
-
-fn debug_sdf(point: vec3<f32>) -> f32 {
-    let object_center = (OBJECT_BOUNDS_MIN + OBJECT_BOUNDS_MAX) * 0.5;
-    let centered_point = point - object_center;
-    let rotated_point = rotate_y(centered_point, -frame_params.time_seconds * 0.3);
-    return sd_torus(rotate_z(rotated_point, HALF_PI), vec2<f32>(0.38, 0.16));
-}
 
 fn voxel_size() -> f32 {
     return 1.0 / f32(VOXEL_GRID_DIM_U32);
@@ -64,7 +50,9 @@ fn flatten_region_index(region_position: vec3<u32>) -> u32 {
 }
 
 fn flatten_coarse_index(region_position: vec3<u32>) -> u32 {
-    return region_position.x + 4u * (region_position.y + 4u * region_position.z);
+    return region_position.x
+        + COARSE_REGION_AXIS_U32
+            * (region_position.y + COARSE_REGION_AXIS_U32 * region_position.z);
 }
 
 fn flatten_leaf_index(local_position: vec3<u32>) -> u32 {
@@ -87,9 +75,37 @@ fn set_mask_bit(object_index: u32, word_index: u32, bit_index: u32) {
     );
 }
 
+fn world_position(chunk_origin: vec3<f32>, voxel: vec3<u32>) -> vec3<f32> {
+    let size = voxel_size();
+    return chunk_origin + OBJECT_BOUNDS_MIN + (vec3<f32>(voxel) + vec3<f32>(0.5)) * size;
+}
+
+fn terrain_height(position: vec3<f32>) -> f32 {
+    return 0.35
+        + 0.24 * sin(position.x * 1.10)
+        + 0.18 * cos(position.z * 0.85)
+        + 0.08 * sin((position.x + position.z) * 0.55);
+}
+
+fn cave_noise(position: vec3<f32>) -> f32 {
+    return sin(position.x * 2.4)
+        + cos(position.y * 3.1) * 0.7
+        + sin(position.z * 2.0) * 0.8
+        + cos((position.x - position.z) * 1.3) * 0.35;
+}
+
+fn chunk_density_filled(chunk_origin: vec3<f32>, voxel: vec3<u32>) -> bool {
+    let position = world_position(chunk_origin, voxel);
+    if (position.y > terrain_height(position)) {
+        return false;
+    }
+
+    return cave_noise(position) > -0.45;
+}
+
 @compute @workgroup_size(256, 1, 1)
 fn clear_occupancy_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let total_word_count = frame_params.object_count * OCCUPANCY_WORD_COUNT_U32;
+    let total_word_count = generation_params.active_object_count * OCCUPANCY_WORD_COUNT_U32;
     if (id.x >= total_word_count) {
         return;
     }
@@ -98,22 +114,22 @@ fn clear_occupancy_main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(8, 8, 2)
-fn populate_debug_sdf_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let total_object_slices = frame_params.object_count * VOXEL_GRID_DIM_U32;
+fn populate_chunk_noise_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let total_object_slices = generation_params.active_object_count * VOXEL_GRID_DIM_U32;
     if (id.x >= VOXEL_GRID_DIM_U32 || id.y >= VOXEL_GRID_DIM_U32 || id.z >= total_object_slices) {
         return;
     }
 
-    let object_index = id.z / VOXEL_GRID_DIM_U32;
+    let object_slot = id.z / VOXEL_GRID_DIM_U32;
     let voxel_z = id.z % VOXEL_GRID_DIM_U32;
+    let object = chunk_objects[object_slot];
     let voxel = vec3<u32>(id.x, id.y, voxel_z);
-    let size = voxel_size();
-    let center = OBJECT_BOUNDS_MIN + (vec3<f32>(voxel) + vec3<f32>(0.5)) * size;
 
-    if (debug_sdf(center) > 0.0) {
+    if (!chunk_density_filled(object.chunk_origin.xyz, voxel)) {
         return;
     }
 
+    let object_index = object.object_index;
     let region = voxel >> vec3<u32>(3u);
     let coarse_region = voxel >> vec3<u32>(4u);
     let region_index = flatten_region_index(region);

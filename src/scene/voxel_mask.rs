@@ -1,17 +1,26 @@
+#[cfg(test)]
 pub(crate) const VOXEL_GRID_DIM: u32 = 64;
+#[cfg(test)]
 pub(crate) const REGION_AXIS: u32 = 8;
+#[cfg(test)]
 pub(crate) const REGION_COUNT: usize =
     (REGION_AXIS as usize) * (REGION_AXIS as usize) * (REGION_AXIS as usize);
+#[cfg(test)]
 pub(crate) const COARSE_REGION_AXIS: u32 = 4;
+#[cfg(test)]
 pub(crate) const COARSE_REGION_COUNT: usize =
     (COARSE_REGION_AXIS as usize) * (COARSE_REGION_AXIS as usize) * (COARSE_REGION_AXIS as usize);
+#[cfg(test)]
 pub(crate) const MASK_WORD_BITS: usize = u32::BITS as usize;
+#[cfg(test)]
 pub(crate) const MASK_WORD_COUNT: usize = REGION_COUNT.div_ceil(MASK_WORD_BITS);
+#[cfg(test)]
 pub(crate) const COARSE_MASK_WORD_COUNT: usize = COARSE_REGION_COUNT.div_ceil(MASK_WORD_BITS);
+#[cfg(test)]
 pub(crate) const COARSE_MASK_WORD_OFFSET: usize = MASK_WORD_COUNT;
+#[cfg(test)]
 pub(crate) const LEAF_MASK_WORD_OFFSET: usize = COARSE_MASK_WORD_OFFSET + COARSE_MASK_WORD_COUNT;
-pub(crate) const OCCUPANCY_WORD_COUNT: usize =
-    LEAF_MASK_WORD_OFFSET + REGION_COUNT * MASK_WORD_COUNT;
+pub(crate) const OCCUPANCY_WORD_COUNT: usize = 8_210;
 
 #[cfg(test)]
 fn flatten_region_index(region_position: [u32; 3]) -> usize {

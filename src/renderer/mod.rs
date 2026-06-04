@@ -2,11 +2,7 @@ mod context;
 mod output;
 mod passes;
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::Path, sync::Arc};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -18,7 +14,7 @@ use winit::{
 use crate::{
     InputState,
     scene::{
-        Camera, OCCUPANCY_WORD_COUNT, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN,
+        Camera, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN, OCCUPANCY_WORD_COUNT,
         ProceduralAccelerationScene, RenderObject,
     },
 };
@@ -28,10 +24,6 @@ use self::{
     output::OutputTarget,
     passes::{BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass},
 };
-
-const TARGET_VOXEL_UPDATES_PER_SECOND: u64 = 60;
-const TARGET_VOXEL_UPDATE_INTERVAL: Duration =
-    Duration::from_nanos(1_000_000_000 / TARGET_VOXEL_UPDATES_PER_SECOND);
 
 struct PresentationPasses {
     blit_pass: BlitPass,
@@ -45,26 +37,12 @@ struct DebugVisualizationParams {
     world_extent: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub(crate) struct FrameParams {
-    time_seconds: f32,
-    object_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-}
-
 pub(crate) struct Renderer {
     context: GpuContext,
     camera: Camera,
     camera_buffer: wgpu::Buffer,
     debug_visualization_buffer: wgpu::Buffer,
-    frame_params_buffer: wgpu::Buffer,
     voxel_mask_buffer: wgpu::Buffer,
-    object_count: u32,
-    active_objects: usize,
-    frame_started_at: Instant,
-    last_voxel_update_at: Option<Instant>,
     procedural_scene: ProceduralAccelerationScene,
     output_target: OutputTarget,
     generate_voxels_pass: GenerateVoxelsPass,
@@ -73,33 +51,25 @@ pub(crate) struct Renderer {
 }
 
 impl Renderer {
-    pub(crate) async fn new(
-        window: Arc<Window>,
-        all_objects: &[RenderObject],
-        active_objects: &[RenderObject],
-    ) -> Result<Self, String> {
+    pub(crate) async fn new(window: Arc<Window>, objects: &[RenderObject]) -> Result<Self, String> {
         let context = GpuContext::new(window).await?;
-        Self::new_with_context(context, all_objects, active_objects).await
+        Self::new_with_context(context, objects).await
     }
 
     pub(crate) async fn new_headless(
         size: PhysicalSize<u32>,
-        all_objects: &[RenderObject],
-        active_objects: &[RenderObject],
+        objects: &[RenderObject],
     ) -> Result<Self, String> {
         let context = GpuContext::new_headless(size).await?;
-        Self::new_with_context(context, all_objects, active_objects).await
+        Self::new_with_context(context, objects).await
     }
 
     async fn new_with_context(
         context: GpuContext,
-        all_objects: &[RenderObject],
-        active_objects: &[RenderObject],
+        objects: &[RenderObject],
     ) -> Result<Self, String> {
         let camera = Camera::new();
-        let object_count = all_objects.len() as u32;
         let size = context.current_size();
-        let debug_visualization = debug_visualization_params(all_objects);
         let camera_buffer = context
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -108,48 +78,21 @@ impl Renderer {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
         let debug_visualization_buffer =
-            context
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("debug visualization buffer"),
-                    contents: bytemuck::bytes_of(&debug_visualization),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-        let frame_params_buffer =
-            context
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("frame params buffer"),
-                    contents: bytemuck::bytes_of(&FrameParams {
-                        time_seconds: 0.0,
-                        object_count,
-                        _pad0: 0,
-                        _pad1: 0,
-                    }),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
-        let voxel_mask_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("voxel occupancy bitmask"),
-            size: (object_count as u64) * (OCCUPANCY_WORD_COUNT * core::mem::size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
+            Self::create_debug_visualization_buffer(&context.device, objects);
+        let voxel_mask_buffer = Self::create_voxel_mask_buffer(&context.device, objects);
+        let generate_voxels_pass =
+            GenerateVoxelsPass::new(&context.device, &voxel_mask_buffer, objects);
+        Self::dispatch_voxel_generation(&context.device, &context.queue, &generate_voxels_pass);
 
         let procedural_scene = ProceduralAccelerationScene::build(
             &context.device,
             &context.queue,
-            active_objects,
+            objects,
             OBJECT_BOUNDS_MIN,
             OBJECT_BOUNDS_MAX,
         )?;
 
         let output_target = OutputTarget::new(&context.device, size.width, size.height);
-        let generate_voxels_pass = GenerateVoxelsPass::new(
-            &context.device,
-            &voxel_mask_buffer,
-            &frame_params_buffer,
-            object_count,
-        );
         let compute_pass = ComputeVoxelsPass::new(
             &context.device,
             size.width,
@@ -164,7 +107,11 @@ impl Renderer {
             &voxel_mask_buffer,
         );
         let presentation = context.window.as_ref().map(|_| PresentationPasses {
-            blit_pass: BlitPass::new(&context.device, context.surface_format(), output_target.view()),
+            blit_pass: BlitPass::new(
+                &context.device,
+                context.surface_format(),
+                output_target.view(),
+            ),
             fps_overlay: FpsOverlay::new(&context.device, context.surface_format()),
         });
 
@@ -173,12 +120,7 @@ impl Renderer {
             camera,
             camera_buffer,
             debug_visualization_buffer,
-            frame_params_buffer,
             voxel_mask_buffer,
-            object_count,
-            active_objects: active_objects.len(),
-            frame_started_at: Instant::now(),
-            last_voxel_update_at: None,
             procedural_scene,
             output_target,
             generate_voxels_pass,
@@ -200,19 +142,24 @@ impl Renderer {
         self.update_camera_buffer();
     }
 
-    pub(crate) fn sync_scene(&mut self, active_objects: &[RenderObject]) -> Result<(), String> {
-        if active_objects.len() == self.active_objects {
-            return Ok(());
-        }
-
+    pub(crate) fn sync_scene(&mut self, objects: &[RenderObject]) -> Result<(), String> {
+        self.debug_visualization_buffer =
+            Self::create_debug_visualization_buffer(&self.context.device, objects);
+        self.voxel_mask_buffer = Self::create_voxel_mask_buffer(&self.context.device, objects);
+        self.generate_voxels_pass =
+            GenerateVoxelsPass::new(&self.context.device, &self.voxel_mask_buffer, objects);
+        Self::dispatch_voxel_generation(
+            &self.context.device,
+            &self.context.queue,
+            &self.generate_voxels_pass,
+        );
         self.procedural_scene = ProceduralAccelerationScene::build(
             &self.context.device,
             &self.context.queue,
-            active_objects,
+            objects,
             OBJECT_BOUNDS_MIN,
             OBJECT_BOUNDS_MAX,
         )?;
-        self.active_objects = active_objects.len();
         self.compute_pass.rebind(
             &self.context.device,
             self.context.current_size().width,
@@ -244,8 +191,6 @@ impl Renderer {
         let Some(frame) = self.context.acquire_frame()? else {
             return Ok(());
         };
-        self.update_frame_params_buffer();
-        let should_update_voxels = self.should_update_voxels();
         let presentation = self
             .presentation
             .as_mut()
@@ -269,9 +214,6 @@ impl Renderer {
 
         let (coarse_width, coarse_height) = self.output_target.coarse_depth_size();
         let size = self.context.current_size();
-        if should_update_voxels {
-            self.generate_voxels_pass.dispatch(&mut encoder);
-        }
         self.compute_pass.dispatch(
             &mut encoder,
             size.width,
@@ -312,7 +254,6 @@ impl Renderer {
     }
 
     pub(crate) fn render_headless(&mut self) -> Result<(), String> {
-        self.update_frame_params_buffer();
         let mut encoder =
             self.context
                 .device
@@ -322,9 +263,6 @@ impl Renderer {
 
         let (coarse_width, coarse_height) = self.output_target.coarse_depth_size();
         let size = self.context.current_size();
-        if self.should_update_voxels() {
-            self.generate_voxels_pass.dispatch(&mut encoder);
-        }
         self.compute_pass.dispatch(
             &mut encoder,
             size.width,
@@ -373,37 +311,46 @@ impl Renderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
-    fn update_frame_params_buffer(&self) {
-        let frame_params = FrameParams {
-            time_seconds: self.frame_started_at.elapsed().as_secs_f32(),
-            object_count: self.object_count,
-            _pad0: 0,
-            _pad1: 0,
-        };
-        self.context.queue.write_buffer(
-            &self.frame_params_buffer,
-            0,
-            bytemuck::bytes_of(&frame_params),
-        );
+    fn create_debug_visualization_buffer(
+        device: &wgpu::Device,
+        objects: &[RenderObject],
+    ) -> wgpu::Buffer {
+        let debug_visualization = debug_visualization_params(objects);
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("debug visualization buffer"),
+            contents: bytemuck::bytes_of(&debug_visualization),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
     }
 
-    fn should_update_voxels(&mut self) -> bool {
-        let now = Instant::now();
-        let Some(last_update_at) = self.last_voxel_update_at else {
-            self.last_voxel_update_at = Some(now);
-            return true;
-        };
+    fn create_voxel_mask_buffer(device: &wgpu::Device, objects: &[RenderObject]) -> wgpu::Buffer {
+        let object_count = objects
+            .iter()
+            .map(|object| object.object_index as u64 + 1)
+            .max()
+            .unwrap_or(0);
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("voxel occupancy bitmask"),
+            size: object_count * (OCCUPANCY_WORD_COUNT * core::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    }
 
-        if now.duration_since(last_update_at) < TARGET_VOXEL_UPDATE_INTERVAL {
-            return false;
-        }
-
-        self.last_voxel_update_at = Some(now);
-        true
+    fn dispatch_voxel_generation(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        generate_voxels_pass: &GenerateVoxelsPass,
+    ) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("voxel generation encoder"),
+        });
+        generate_voxels_pass.dispatch(&mut encoder);
+        queue.submit(Some(encoder.finish()));
     }
 }
 
-fn debug_visualization_params(all_objects: &[RenderObject]) -> DebugVisualizationParams {
+fn debug_visualization_params(objects: &[RenderObject]) -> DebugVisualizationParams {
     let mut world_min = [
         OBJECT_BOUNDS_MIN[0],
         OBJECT_BOUNDS_MIN[1],
@@ -415,7 +362,7 @@ fn debug_visualization_params(all_objects: &[RenderObject]) -> DebugVisualizatio
         OBJECT_BOUNDS_MAX[2],
     ];
 
-    if let Some(first) = all_objects.first() {
+    if let Some(first) = objects.first() {
         world_min = [
             first.position[0] + OBJECT_BOUNDS_MIN[0],
             first.position[1] + OBJECT_BOUNDS_MIN[1],
@@ -427,7 +374,7 @@ fn debug_visualization_params(all_objects: &[RenderObject]) -> DebugVisualizatio
             first.position[2] + OBJECT_BOUNDS_MAX[2],
         ];
 
-        for object in &all_objects[1..] {
+        for object in &objects[1..] {
             let object_min = [
                 object.position[0] + OBJECT_BOUNDS_MIN[0],
                 object.position[1] + OBJECT_BOUNDS_MIN[1],
