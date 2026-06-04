@@ -797,7 +797,7 @@ fn broadcast_command_color(origin: vec2<u32>, coverage: vec2<u32>, color: vec3<f
     }
 }
 
-const HEATMAP_UV_X_THRESHOLD = 0.0;
+const HEATMAP_UV_X_THRESHOLD = 1.0;
 
 fn broadcast_heatmap_command(
     origin: vec2<u32>,

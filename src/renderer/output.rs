@@ -6,7 +6,7 @@ pub(crate) const WORLD_POSITION_TEXTURE_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba32Float;
 pub(crate) const SHADING_INPUT_TEXTURE_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba32Float;
-pub(crate) const COARSE_DEPTH_DIVISOR: u32 = 8;
+pub(crate) const COARSE_DEPTH_DIVISOR: u32 = 2;
 
 pub(crate) struct OutputTarget {
     output_texture: wgpu::Texture,

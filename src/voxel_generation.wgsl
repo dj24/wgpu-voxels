@@ -110,10 +110,14 @@ fn noise3D(x: vec3<f32>) -> f32 {
     f.z);
 }
 
+const MAX_HEIGHT = 3;
+
 fn chunk_density_filled(chunk_origin: vec3<f32>, voxel: vec3<u32>) -> bool {
     let position = world_position(chunk_origin, voxel);
-
-    return noise3D(position) > 0.5;
+    let squish_factor = f32(position.y) / f32(MAX_HEIGHT);
+    let noise = noise3D(position);
+    let squished_noise = noise - squish_factor;
+    return squished_noise > 0.5;
 }
 
 @compute @workgroup_size(256, 1, 1)
