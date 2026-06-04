@@ -25,6 +25,16 @@ use self::{
     passes::{BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass},
 };
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DebugView {
+    #[default]
+    Default = 0,
+    Heatmap = 1,
+    WorldPosition = 2,
+    Depth = 3,
+}
+
 struct PresentationPasses {
     blit_pass: BlitPass,
     fps_overlay: FpsOverlay,
@@ -35,12 +45,16 @@ struct PresentationPasses {
 struct DebugVisualizationParams {
     world_min: [f32; 4],
     world_extent: [f32; 4],
+    camera_position: [f32; 4],
+    debug_view: [u32; 4],
 }
 
 pub(crate) struct Renderer {
     context: GpuContext,
     camera: Camera,
+    debug_view: DebugView,
     camera_buffer: wgpu::Buffer,
+    debug_visualization_params: DebugVisualizationParams,
     debug_visualization_buffer: wgpu::Buffer,
     voxel_mask_buffer: wgpu::Buffer,
     procedural_scene: ProceduralAccelerationScene,
@@ -69,6 +83,7 @@ impl Renderer {
         objects: &[RenderObject],
     ) -> Result<Self, String> {
         let camera = Camera::new();
+        let debug_view = DebugView::Default;
         let size = context.current_size();
         let camera_buffer = context
             .device
@@ -77,8 +92,9 @@ impl Renderer {
                 contents: bytemuck::bytes_of(&camera.to_uniform(size)),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+        let debug_visualization_params = debug_visualization_params(objects, &camera, debug_view);
         let debug_visualization_buffer =
-            Self::create_debug_visualization_buffer(&context.device, objects);
+            Self::create_debug_visualization_buffer(&context.device, debug_visualization_params);
         let voxel_mask_buffer = Self::create_voxel_mask_buffer(&context.device, objects);
         let generate_voxels_pass =
             GenerateVoxelsPass::new(&context.device, &voxel_mask_buffer, objects);
@@ -118,7 +134,9 @@ impl Renderer {
         Ok(Self {
             context,
             camera,
+            debug_view,
             camera_buffer,
+            debug_visualization_params,
             debug_visualization_buffer,
             voxel_mask_buffer,
             procedural_scene,
@@ -147,11 +165,27 @@ impl Renderer {
     pub(crate) fn update_camera(&mut self, input: &InputState, delta_seconds: f32) {
         self.camera.update(input, delta_seconds);
         self.update_camera_buffer();
+        self.debug_visualization_params.camera_position = self.camera.position_uniform();
+        self.update_debug_visualization_buffer();
+    }
+
+    pub(crate) fn set_debug_view(&mut self, debug_view: DebugView) {
+        if self.debug_view == debug_view {
+            return;
+        }
+
+        self.debug_view = debug_view;
+        self.debug_visualization_params.debug_view = [debug_view as u32, 0, 0, 0];
+        self.update_debug_visualization_buffer();
     }
 
     pub(crate) fn sync_scene(&mut self, objects: &[RenderObject]) -> Result<(), String> {
-        self.debug_visualization_buffer =
-            Self::create_debug_visualization_buffer(&self.context.device, objects);
+        self.debug_visualization_params =
+            debug_visualization_params(objects, &self.camera, self.debug_view);
+        self.debug_visualization_buffer = Self::create_debug_visualization_buffer(
+            &self.context.device,
+            self.debug_visualization_params,
+        );
         self.voxel_mask_buffer = Self::create_voxel_mask_buffer(&self.context.device, objects);
         self.generate_voxels_pass =
             GenerateVoxelsPass::new(&self.context.device, &self.voxel_mask_buffer, objects);
@@ -227,6 +261,7 @@ impl Renderer {
             size.height,
             coarse_width,
             coarse_height,
+            self.debug_view,
         );
 
         {
@@ -276,6 +311,7 @@ impl Renderer {
             size.height,
             coarse_width,
             coarse_height,
+            self.debug_view,
         );
 
         self.context.queue.submit(Some(encoder.finish()));
@@ -318,15 +354,22 @@ impl Renderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
+    fn update_debug_visualization_buffer(&self) {
+        self.context.queue.write_buffer(
+            &self.debug_visualization_buffer,
+            0,
+            bytemuck::bytes_of(&self.debug_visualization_params),
+        );
+    }
+
     fn create_debug_visualization_buffer(
         device: &wgpu::Device,
-        objects: &[RenderObject],
+        debug_visualization: DebugVisualizationParams,
     ) -> wgpu::Buffer {
-        let debug_visualization = debug_visualization_params(objects);
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("debug visualization buffer"),
             contents: bytemuck::bytes_of(&debug_visualization),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         })
     }
 
@@ -357,7 +400,11 @@ impl Renderer {
     }
 }
 
-fn debug_visualization_params(objects: &[RenderObject]) -> DebugVisualizationParams {
+fn debug_visualization_params(
+    objects: &[RenderObject],
+    camera: &Camera,
+    debug_view: DebugView,
+) -> DebugVisualizationParams {
     let mut world_min = [
         OBJECT_BOUNDS_MIN[0],
         OBJECT_BOUNDS_MIN[1],
@@ -408,5 +455,7 @@ fn debug_visualization_params(objects: &[RenderObject]) -> DebugVisualizationPar
             (world_max[2] - world_min[2]).max(1e-5),
             0.0,
         ],
+        camera_position: camera.position_uniform(),
+        debug_view: [debug_view as u32, 0, 0, 0],
     }
 }

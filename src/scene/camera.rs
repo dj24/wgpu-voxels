@@ -47,6 +47,10 @@ impl Camera {
         }
     }
 
+    pub(crate) fn position_uniform(&self) -> [f32; 4] {
+        self.position.extend(0.0).to_array()
+    }
+
     pub(crate) fn update(&mut self, input: &InputState, delta_seconds: f32) {
         if delta_seconds <= 0.0 {
             return;

@@ -16,7 +16,7 @@ use winit::{
 mod renderer;
 mod scene;
 
-use renderer::Renderer;
+use renderer::{DebugView, Renderer};
 use scene::{
     ActiveSceneSnapshot, SceneWorld, advance_chunk_loading, build_scene_world,
     collect_active_render_objects, collect_all_render_objects,
@@ -120,6 +120,7 @@ where
 
 struct App {
     renderer: Option<Renderer>,
+    debug_view: DebugView,
     world: SceneWorld,
     scene_snapshot: ActiveSceneSnapshot,
     input: InputState,
@@ -131,6 +132,7 @@ impl Default for App {
         let world = build_scene_world();
         Self {
             renderer: None,
+            debug_view: DebugView::Default,
             scene_snapshot: ActiveSceneSnapshot {
                 active_count: collect_active_render_objects(&world).len(),
             },
@@ -199,12 +201,12 @@ impl ApplicationHandler for App {
 
         let objects = collect_active_render_objects(&self.world);
         match pollster::block_on(Renderer::new(window, &objects)) {
-            Ok(renderer) => {
+            Ok(mut renderer) => {
+                renderer.set_debug_view(self.debug_view);
                 let window = renderer.window();
                 window.set_cursor_visible(false);
                 if let Err(error) = window.set_cursor_grab(CursorGrabMode::Locked) {
-                    if let Err(confined_error) = window.set_cursor_grab(CursorGrabMode::Confined)
-                    {
+                    if let Err(confined_error) = window.set_cursor_grab(CursorGrabMode::Confined) {
                         eprintln!(
                             "failed to grab cursor: {error}; fallback failed: {confined_error}"
                         );
@@ -254,6 +256,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    if event.state == ElementState::Pressed {
+                        let debug_view = match code {
+                            KeyCode::Digit1 => Some(DebugView::Default),
+                            KeyCode::Digit2 => Some(DebugView::Heatmap),
+                            KeyCode::Digit3 => Some(DebugView::WorldPosition),
+                            KeyCode::Digit4 => Some(DebugView::Depth),
+                            _ => None,
+                        };
+                        if let Some(debug_view) = debug_view {
+                            self.debug_view = debug_view;
+                            renderer.set_debug_view(debug_view);
+                        }
+                    }
                     self.input
                         .set_key(code, event.state == ElementState::Pressed);
                 }

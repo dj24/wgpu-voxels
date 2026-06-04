@@ -11,6 +11,8 @@ struct Camera {
 struct DebugVisualizationParams {
     world_min: vec4<f32>,
     world_extent: vec4<f32>,
+    camera_position: vec4<f32>,
+    debug_view: vec4<u32>,
 }
 
 struct RayMarch {
@@ -95,9 +97,14 @@ const MAX_RAY_MARCH_STEPS: u32 = 512u;
 const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 const COARSE_DEPTH_BIAS_SCALE: f32 = 0.0;
+const PRIMARY_RAY_T_MAX: f32 = 100.0;
 const SHADOW_RAY_T_MIN: f32 = 0.001;
 const SHADOW_RAY_T_MAX: f32 = 100.0;
 const SHADE_COMMAND_WORKGROUP_SIZE: u32 = 64u;
+const DEBUG_VIEW_DEFAULT: u32 = 0u;
+const DEBUG_VIEW_HEATMAP: u32 = 1u;
+const DEBUG_VIEW_WORLD_POSITION: u32 = 2u;
+const DEBUG_VIEW_DEPTH: u32 = 3u;
 
 var<workgroup> shared_keys: array<vec4<f32>, 64>;
 var<workgroup> shared_valid: array<u32, 64>;
@@ -587,6 +594,10 @@ fn normalized_world_position(world_position: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn debug_view_mode() -> u32 {
+    return debug_visualization.debug_view.x;
+}
+
 fn hash01(coord: vec2<u32>) -> f32 {
     let value = sin(dot(vec2<f32>(coord), vec2<f32>(12.9898, 78.233))) * 43758.5453;
     return fract(value);
@@ -668,6 +679,13 @@ fn shade_ray_complexity(base_color: vec3<f32>, step_count: u32) -> vec3<f32> {
     let normalized_steps = saturate(log2(f32(step_count) + 1.0) / log2(f32(MAX_RAY_MARCH_STEPS) + 1.0));
     let heatmap = heatmap_ramp(normalized_steps);
     return mix(base_color * 0.18, heatmap, 0.88);
+}
+
+fn depth_debug_color(world_position: vec3<f32>) -> vec3<f32> {
+    let depth = length(world_position - debug_visualization.camera_position.xyz);
+    let normalized_depth = saturate(log2(depth + 1.0) / log2(PRIMARY_RAY_T_MAX + 1.0));
+    let value = 1.0 - normalized_depth;
+    return vec3<f32>(value);
 }
 
 fn local_index(local_id: vec2<u32>) -> u32 {
@@ -797,38 +815,6 @@ fn broadcast_command_color(origin: vec2<u32>, coverage: vec2<u32>, color: vec3<f
     }
 }
 
-const HEATMAP_UV_X_THRESHOLD = 0.0;
-
-fn broadcast_heatmap_command(
-    origin: vec2<u32>,
-    coverage: vec2<u32>,
-    world_position: vec4<f32>,
-    shading_input: vec4<f32>,
-) {
-    let dimensions = textureDimensions(world_position_texture);
-    let has_debug = has_heatmap_debug(world_position);
-    let visible = is_visible_surface(world_position);
-    let base_color = palette(u32(max(shading_input.w, 0.0)));
-    let heatmap_color = shade_ray_complexity(base_color, encoded_step_count(world_position));
-    let shaded = select(
-        vec3<f32>(0.0),
-        shaded_color(world_position.xyz, shading_input),
-        visible,
-    );
-
-    for (var offset_y = 0u; offset_y < coverage.y; offset_y = offset_y + 1u) {
-        for (var offset_x = 0u; offset_x < coverage.x; offset_x = offset_x + 1u) {
-            let pixel = origin + vec2<u32>(offset_x, offset_y);
-            let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
-            let background = debug_background(uv);
-            let left_color = select(background, heatmap_color, has_debug);
-            let right_color = select(background, shaded, visible);
-            let color = select(left_color, right_color, uv.x >= HEATMAP_UV_X_THRESHOLD);
-            textureStore(output_texture, vec2<i32>(pixel), vec4<f32>(color, 1.0));
-        }
-    }
-}
-
 @compute @workgroup_size(8, 8, 1)
 fn coarse_depth_prepass_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let coarse_dimensions = textureDimensions(coarse_depth_output);
@@ -841,7 +827,7 @@ fn coarse_depth_prepass_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray_direction = compute_camera_ray_direction(uv);
 
     var query: ray_query;
-    let ray = RayDesc(0u, 0xffu, 0.01, 100.0, ray_origin, ray_direction);
+    let ray = RayDesc(0u, 0xffu, 0.01, PRIMARY_RAY_T_MAX, ray_origin, ray_direction);
     rayQueryInitialize(&query, scene_tlas, ray);
 
     var coarse_depth = ray.tmax;
@@ -893,7 +879,7 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray_t_min = max(coarse_depth - coarse_depth_bias, 0.01);
 
     var query: ray_query;
-    let ray = RayDesc(0u, 0xffu, ray_t_min, 100.0, ray_origin, ray_direction);
+    let ray = RayDesc(0u, 0xffu, ray_t_min, PRIMARY_RAY_T_MAX, ray_origin, ray_direction);
     rayQueryInitialize(&query, scene_tlas, ray);
 
     var stored_world_position = vec4<f32>(0.0);
@@ -947,23 +933,6 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     textureStore(world_position_output, vec2<i32>(id.xy), stored_world_position);
     textureStore(shading_input_output, vec2<i32>(id.xy), stored_shading_input);
-}
-
-@compute @workgroup_size(8, 8, 1)
-fn visualize_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let dimensions = textureDimensions(world_position_texture);
-    if (id.x >= dimensions.x || id.y >= dimensions.y) {
-        return;
-    }
-
-    let key = textureLoad(world_position_texture, vec2<i32>(id.xy), 0);
-    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
-    let color = select(
-        debug_background(uv),
-        normalized_world_position(key.xyz),
-        key.w > 0.5,
-    );
-    textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1027,7 +996,7 @@ fn prepare_shade_dispatch_args_main(@builtin(global_invocation_id) id: vec3<u32>
     shade_dispatch_args.z = 1u;
 }
 
-fn consume_shade_command(command_index: u32, debug_coverage_only: bool) {
+fn consume_shade_command(command_index: u32) {
     let command_count = atomicLoad(&shade_command_count.value);
     if (command_index >= command_count) {
         return;
@@ -1041,41 +1010,51 @@ fn consume_shade_command(command_index: u32, debug_coverage_only: bool) {
     let color = select(
         shaded_color(world_position.xyz, shading_input),
         coverage_debug_color(origin, coverage, world_position),
-        debug_coverage_only,
-    );
-    let final_color = select(
-        color,
-        coverage_debug_color(origin, coverage, world_position),
         !is_visible_surface(world_position),
     );
-    broadcast_command_color(origin, coverage, final_color);
-}
-
-fn consume_heatmap_command(command_index: u32) {
-    let command_count = atomicLoad(&shade_command_count.value);
-    if (command_index >= command_count) {
-        return;
-    }
-
-    let command = shade_commands[command_index];
-    let origin = unpack_command_origin(command.x);
-    let coverage = coverage_size_from_mode(command.y);
-    let world_position = textureLoad(world_position_texture, vec2<i32>(origin), 0);
-    let shading_input = textureLoad(shading_input_texture, vec2<i32>(origin), 0);
-    broadcast_heatmap_command(origin, coverage, world_position, shading_input);
-}
-
-@compute @workgroup_size(64, 1, 1)
-fn consume_command_coverage_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    consume_shade_command(id.x, true);
+    broadcast_command_color(origin, coverage, color);
 }
 
 @compute @workgroup_size(64, 1, 1)
 fn consume_shade_commands_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    consume_shade_command(id.x, false);
+    consume_shade_command(id.x);
 }
 
-@compute @workgroup_size(64, 1, 1)
-fn consume_heatmap_commands_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    consume_heatmap_command(id.x);
+@compute @workgroup_size(8, 8, 1)
+fn debug_visualization_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dimensions = textureDimensions(world_position_texture);
+    if (id.x >= dimensions.x || id.y >= dimensions.y) {
+        return;
+    }
+
+    let pixel = vec2<i32>(id.xy);
+    let world_position = textureLoad(world_position_texture, pixel, 0);
+    let shading_input = textureLoad(shading_input_texture, pixel, 0);
+    let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
+    let background = debug_background(uv);
+    let mode = debug_view_mode();
+
+    var color = background;
+
+    if (mode == DEBUG_VIEW_HEATMAP) {
+        let base_color = palette(u32(max(shading_input.w, 0.0)));
+        let heatmap_color = shade_ray_complexity(base_color, encoded_step_count(world_position));
+        color = select(background, heatmap_color, has_heatmap_debug(world_position));
+    } else if (mode == DEBUG_VIEW_WORLD_POSITION) {
+        color = select(
+            background,
+            normalized_world_position(world_position.xyz),
+            is_visible_surface(world_position),
+        );
+    } else if (mode == DEBUG_VIEW_DEPTH) {
+        color = select(
+            background,
+            depth_debug_color(world_position.xyz),
+            is_visible_surface(world_position),
+        );
+    } else if (mode == DEBUG_VIEW_DEFAULT) {
+        return;
+    }
+
+    textureStore(output_texture, pixel, vec4<f32>(color, 1.0));
 }

@@ -215,9 +215,9 @@ mod tests {
     use super::coarse_depth_dimensions;
 
     #[test]
-    fn coarse_depth_dimensions_round_up_by_eighths() {
-        assert_eq!(coarse_depth_dimensions(1920, 1080), (240, 135));
-        assert_eq!(coarse_depth_dimensions(1919, 1079), (240, 135));
+    fn coarse_depth_dimensions_round_up_by_divisor() {
+        assert_eq!(coarse_depth_dimensions(1920, 1080), (960, 540));
+        assert_eq!(coarse_depth_dimensions(1919, 1079), (960, 540));
         assert_eq!(coarse_depth_dimensions(1, 1), (1, 1));
         assert_eq!(coarse_depth_dimensions(0, 0), (1, 1));
     }

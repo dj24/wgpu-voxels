@@ -1,6 +1,9 @@
-use crate::renderer::output::{
-    COARSE_DEPTH_TEXTURE_FORMAT, OUTPUT_TEXTURE_FORMAT, SHADING_INPUT_TEXTURE_FORMAT,
-    WORLD_POSITION_TEXTURE_FORMAT,
+use crate::renderer::{
+    DebugView,
+    output::{
+        COARSE_DEPTH_TEXTURE_FORMAT, OUTPUT_TEXTURE_FORMAT, SHADING_INPUT_TEXTURE_FORMAT,
+        WORLD_POSITION_TEXTURE_FORMAT,
+    },
 };
 
 const TILE_WORKGROUP_SIZE: u32 = 8;
@@ -16,17 +19,6 @@ struct ShadeCommandResources {
     dispatch_args_buffer: wgpu::Buffer,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-enum VisualizationMode {
-    WorldPosition,
-    CommandCoverage,
-    TileGroups,
-    Heatmap,
-}
-
-const DEFAULT_VISUALIZATION_MODE: VisualizationMode = VisualizationMode::Heatmap;
-
 pub(crate) struct ComputeVoxelsPass {
     coarse_depth_bind_group_layout: wgpu::BindGroupLayout,
     trace_bind_group_layout: wgpu::BindGroupLayout,
@@ -35,12 +27,10 @@ pub(crate) struct ComputeVoxelsPass {
     prepare_bind_group_layout: wgpu::BindGroupLayout,
     coarse_depth_pipeline: wgpu::ComputePipeline,
     trace_pipeline: wgpu::ComputePipeline,
-    visualize_world_position_pipeline: wgpu::ComputePipeline,
     emit_shade_commands_pipeline: wgpu::ComputePipeline,
     prepare_shade_dispatch_args_pipeline: wgpu::ComputePipeline,
-    consume_command_coverage_pipeline: wgpu::ComputePipeline,
     consume_shade_commands_pipeline: wgpu::ComputePipeline,
-    consume_heatmap_pipeline: wgpu::ComputePipeline,
+    debug_visualization_pipeline: wgpu::ComputePipeline,
     shade_command_count_buffer: wgpu::Buffer,
     shade_command_buffer: wgpu::Buffer,
     shade_dispatch_args_buffer: wgpu::Buffer,
@@ -349,16 +339,6 @@ impl ComputeVoxelsPass {
             cache: None,
         });
 
-        let visualize_world_position_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("visualize world position pipeline"),
-                layout: Some(&visualize_pipeline_layout),
-                module: &shader,
-                entry_point: Some("visualize_world_position_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
-            });
-
         let emit_shade_commands_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("emit shade commands pipeline"),
@@ -377,15 +357,6 @@ impl ComputeVoxelsPass {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
-        let consume_command_coverage_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("consume command coverage pipeline"),
-                layout: Some(&visualize_pipeline_layout),
-                module: &shader,
-                entry_point: Some("consume_command_coverage_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
-            });
         let consume_shade_commands_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("consume shade commands pipeline"),
@@ -395,12 +366,12 @@ impl ComputeVoxelsPass {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
-        let consume_heatmap_pipeline =
+        let debug_visualization_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("consume heatmap pipeline"),
+                label: Some("debug visualization pipeline"),
                 layout: Some(&visualize_pipeline_layout),
                 module: &shader,
-                entry_point: Some("consume_heatmap_commands_main"),
+                entry_point: Some("debug_visualization_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
@@ -454,12 +425,10 @@ impl ComputeVoxelsPass {
             prepare_bind_group_layout,
             coarse_depth_pipeline,
             trace_pipeline,
-            visualize_world_position_pipeline,
             emit_shade_commands_pipeline,
             prepare_shade_dispatch_args_pipeline,
-            consume_command_coverage_pipeline,
             consume_shade_commands_pipeline,
-            consume_heatmap_pipeline,
+            debug_visualization_pipeline,
             shade_command_count_buffer: shade_command_resources.count_buffer,
             shade_command_buffer: shade_command_resources.command_buffer,
             shade_dispatch_args_buffer: shade_command_resources.dispatch_args_buffer,
@@ -538,6 +507,7 @@ impl ComputeVoxelsPass {
         height: u32,
         coarse_width: u32,
         coarse_height: u32,
+        debug_view: DebugView,
     ) {
         {
             let mut coarse_depth_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -565,22 +535,6 @@ impl ComputeVoxelsPass {
                 height.div_ceil(TILE_WORKGROUP_SIZE),
                 1,
             );
-        }
-
-        if matches!(DEFAULT_VISUALIZATION_MODE, VisualizationMode::WorldPosition) {
-            let mut visualize_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("world position visualize pass"),
-                timestamp_writes: None,
-            });
-            visualize_pass.set_pipeline(&self.visualize_world_position_pipeline);
-            visualize_pass.set_bind_group(0, &self.visualize_scene_bind_group, &[]);
-            visualize_pass.set_bind_group(1, &self.visualize_bind_group, &[]);
-            visualize_pass.dispatch_workgroups(
-                width.div_ceil(TILE_WORKGROUP_SIZE),
-                height.div_ceil(TILE_WORKGROUP_SIZE),
-                1,
-            );
-            return;
         }
 
         encoder.clear_buffer(&self.shade_command_count_buffer, 0, None);
@@ -611,19 +565,33 @@ impl ComputeVoxelsPass {
             prepare_pass.dispatch_workgroups(1, 1, 1);
         }
 
-        let mut consume_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("consume shade commands pass"),
+        {
+            let mut consume_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("consume shade commands pass"),
+                timestamp_writes: None,
+            });
+            consume_pass.set_pipeline(&self.consume_shade_commands_pipeline);
+            consume_pass.set_bind_group(0, &self.visualize_scene_bind_group, &[]);
+            consume_pass.set_bind_group(1, &self.visualize_bind_group, &[]);
+            consume_pass.dispatch_workgroups_indirect(&self.shade_dispatch_args_buffer, 0);
+        }
+
+        if matches!(debug_view, DebugView::Default) {
+            return;
+        }
+
+        let mut debug_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("debug visualization pass"),
             timestamp_writes: None,
         });
-        consume_pass.set_pipeline(match DEFAULT_VISUALIZATION_MODE {
-            VisualizationMode::WorldPosition => unreachable!(),
-            VisualizationMode::CommandCoverage => &self.consume_command_coverage_pipeline,
-            VisualizationMode::TileGroups => &self.consume_shade_commands_pipeline,
-            VisualizationMode::Heatmap => &self.consume_heatmap_pipeline,
-        });
-        consume_pass.set_bind_group(0, &self.visualize_scene_bind_group, &[]);
-        consume_pass.set_bind_group(1, &self.visualize_bind_group, &[]);
-        consume_pass.dispatch_workgroups_indirect(&self.shade_dispatch_args_buffer, 0);
+        debug_pass.set_pipeline(&self.debug_visualization_pipeline);
+        debug_pass.set_bind_group(0, &self.visualize_scene_bind_group, &[]);
+        debug_pass.set_bind_group(1, &self.visualize_bind_group, &[]);
+        debug_pass.dispatch_workgroups(
+            width.div_ceil(TILE_WORKGROUP_SIZE),
+            height.div_ceil(TILE_WORKGROUP_SIZE),
+            1,
+        );
     }
 
     fn create_coarse_depth_bind_group(

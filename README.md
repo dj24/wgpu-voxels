@@ -55,3 +55,16 @@ so it needs a compatible GPU/driver.
 
 Headless mode skips the window and presentation pass, renders directly into the
 offscreen output texture, and writes that texture to a PNG.
+
+## Debug Views
+
+The interactive renderer supports runtime debug view toggles:
+
+- `1` switches back to the default shaded output.
+- `2` shows the heatmap view.
+- `3` shows normalized world-position output.
+- `4` shows final visible-surface depth from the full-resolution trace.
+
+The debug views are applied as a fullscreen compute pass after the normal shaded
+frame is generated, so the default render path stays intact while debug output
+can be enabled on demand.
