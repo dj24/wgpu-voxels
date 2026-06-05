@@ -101,6 +101,7 @@ const COARSE_DEPTH_BIAS_SCALE: f32 = 0.0;
 const PRIMARY_RAY_T_MAX: f32 = 100.0;
 const SHADOW_RAY_T_MIN: f32 = 0.001;
 const SHADOW_RAY_T_MAX: f32 = 100.0;
+const NORMAL_SAMPLE_RADIUS: i32 = 1;
 const SHADE_COMMAND_WORKGROUP_SIZE: u32 = 64u;
 const DEBUG_VIEW_DEFAULT: u32 = 0u;
 const DEBUG_VIEW_HEATMAP: u32 = 1u;
@@ -502,9 +503,9 @@ fn intersect_voxel_object(
 
         if (voxel_filled(object_mask_offset, cell)) {
             let gradient = vec3<f32>(
-                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(-1, 0, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(1, 0, 0)),
-                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, -1, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 1, 0)),
-                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, -1)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, 1)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(-NORMAL_SAMPLE_RADIUS, 0, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(NORMAL_SAMPLE_RADIUS, 0, 0)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, -NORMAL_SAMPLE_RADIUS, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, NORMAL_SAMPLE_RADIUS, 0)),
+                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, -NORMAL_SAMPLE_RADIUS)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, NORMAL_SAMPLE_RADIUS)),
             );
             let local_normal = select(
                 fallback_normal(local_direction, last_axis, step_dir),
