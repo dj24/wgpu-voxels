@@ -50,16 +50,22 @@ var<uniform> camera: Camera;
 var<storage, read> voxel_occupancy: array<u32>;
 
 @group(0) @binding(3)
-var coarse_depth_texture: texture_2d<f32>;
+var<uniform> previous_camera: Camera;
 
 @group(0) @binding(4)
-var coarse_depth_output: texture_storage_2d<r32float, write>;
+var coarse_depth_texture: texture_2d<f32>;
 
 @group(0) @binding(5)
-var world_position_output: texture_storage_2d<rgba32float, write>;
+var coarse_depth_output: texture_storage_2d<r32float, write>;
 
 @group(0) @binding(6)
+var world_position_output: texture_storage_2d<rgba32float, write>;
+
+@group(0) @binding(7)
 var shading_input_output: texture_storage_2d<rgba32float, write>;
+
+@group(0) @binding(8)
+var motion_vector_output: texture_storage_2d<rgba16float, write>;
 
 @group(1) @binding(0)
 var output_texture: texture_storage_2d<rgba8unorm, write>;
@@ -80,6 +86,9 @@ var<storage, read_write> shade_command_count: ShadeCommandCounter;
 var<storage, read_write> shade_commands: array<vec2<u32>>;
 
 @group(1) @binding(6)
+var motion_vector_texture: texture_2d<f32>;
+
+@group(1) @binding(7)
 var<storage, read_write> shade_dispatch_args: DispatchIndirectArgsStorage;
 
 const VOXEL_GRID_DIM: i32 = 64;
@@ -109,6 +118,7 @@ const DEBUG_VIEW_WORLD_POSITION: u32 = 2u;
 const DEBUG_VIEW_DEPTH: u32 = 3u;
 const DEBUG_VIEW_NORMALS: u32 = 4u;
 const DEBUG_VIEW_SAMPLING_RATE: u32 = 5u;
+const DEBUG_VIEW_MOTION_VECTORS: u32 = 6u;
 const SUN_ROTATION_SPEED_RADIANS: f32 = 0.15;
 
 var<workgroup> shared_keys: array<vec4<f32>, 64>;
@@ -545,6 +555,28 @@ fn compute_camera_ray_direction(uv: vec2<f32>) -> vec3<f32> {
     return normalize(view);
 }
 
+fn project_world_to_uv(view_camera: Camera, world_position: vec3<f32>) -> vec3<f32> {
+    let relative = world_position - view_camera.position.xyz;
+    let view_x = dot(relative, view_camera.right.xyz);
+    let view_y = dot(relative, view_camera.up.xyz);
+    let view_z = dot(relative, view_camera.forward.xyz);
+    if (view_z <= 1e-5) {
+        return vec3<f32>(0.0);
+    }
+
+    let ndc = vec2<f32>(
+        view_x / (view_z * max(view_camera.viewport.x, 1e-5)),
+        -view_y / (view_z * max(view_camera.viewport.y, 1e-5)),
+    );
+    let uv = ndc * 0.5 + vec2<f32>(0.5);
+    let valid = select(
+        0.0,
+        1.0,
+        all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)),
+    );
+    return vec3<f32>(uv, valid);
+}
+
 fn debug_background(uv: vec2<f32>) -> vec3<f32> {
     let base = mix(vec3<f32>(0.04, 0.05, 0.07), vec3<f32>(0.10, 0.12, 0.16), uv.y);
     let band = 0.03 * vec3<f32>(uv.x, 1.0 - uv.y, 0.5 + 0.5 * uv.x);
@@ -756,6 +788,19 @@ fn sampling_rate_debug_color(coverage: vec2<u32>, world_position: vec4<f32>) -> 
     return vec3<f32>(0.0, 0.0, 1.0);
 }
 
+fn motion_vector_debug_color(motion_vector: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
+    if (motion_vector.z < 0.5) {
+        return background;
+    }
+
+    let encoded = clamp(
+        motion_vector.xy * 8.0 + vec2<f32>(0.5),
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
+    );
+    return vec3<f32>(encoded, 0.5);
+}
+
 fn local_index(local_id: vec2<u32>) -> u32 {
     return local_id.y * 8u + local_id.x;
 }
@@ -952,6 +997,7 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var stored_world_position = vec4<f32>(0.0);
     var stored_shading_input = vec4<f32>(0.0);
+    var stored_motion_vector = vec4<f32>(0.0);
     var accumulated_step_count = 0u;
     var closest_debug_t = ray.tmax;
     var closest_debug_step_count = 0u;
@@ -988,8 +1034,14 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let local_voxel_center = (vec3<f32>(marched.cell) + vec3<f32>(0.5)) / f32(VOXEL_GRID_DIM);
         let world_position = (candidate.object_to_world * vec4<f32>(local_voxel_center, 1.0)).xyz;
         let world_normal = normalize((candidate.object_to_world * vec4<f32>(marched.normal, 0.0)).xyz);
+        let previous_uv = project_world_to_uv(previous_camera, world_position);
         stored_world_position = vec4<f32>(world_position, f32(accumulated_step_count) + 1.0);
         stored_shading_input = vec4<f32>(world_normal, f32(candidate.instance_custom_data));
+        if (previous_uv.z > 0.5) {
+            stored_motion_vector = vec4<f32>(uv - previous_uv.xy, 1.0, 0.0);
+        } else {
+            stored_motion_vector = vec4<f32>(0.0);
+        }
 
         rayQueryGenerateIntersection(&query, hit_t);
     }
@@ -1001,6 +1053,7 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     textureStore(world_position_output, vec2<i32>(id.xy), stored_world_position);
     textureStore(shading_input_output, vec2<i32>(id.xy), stored_shading_input);
+    textureStore(motion_vector_output, vec2<i32>(id.xy), stored_motion_vector);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1124,6 +1177,7 @@ fn debug_visualization_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = vec2<i32>(id.xy);
     let world_position = textureLoad(world_position_texture, pixel, 0);
     let shading_input = textureLoad(shading_input_texture, pixel, 0);
+    let motion_vector = textureLoad(motion_vector_texture, pixel, 0);
     let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
     let background = debug_background(uv);
     let mode = debug_view_mode();
@@ -1152,6 +1206,8 @@ fn debug_visualization_main(@builtin(global_invocation_id) id: vec3<u32>) {
             normal_debug_color(shading_input),
             is_visible_surface(world_position),
         );
+    } else if (mode == DEBUG_VIEW_MOTION_VECTORS) {
+        color = motion_vector_debug_color(motion_vector, background);
     } else if (mode == DEBUG_VIEW_DEFAULT) {
         return;
     }

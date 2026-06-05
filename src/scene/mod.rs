@@ -3,7 +3,7 @@ mod ecs;
 mod procedural;
 mod voxel_mask;
 
-pub(crate) use camera::Camera;
+pub(crate) use camera::{Camera, CameraUniform};
 pub(crate) use ecs::{
     ActiveSceneSnapshot, RenderObject, SceneWorld, advance_chunk_loading, build_scene_world,
     collect_active_render_objects, collect_all_render_objects,

@@ -12,6 +12,7 @@ impl TemporalBlendPass {
         device: &wgpu::Device,
         current_output_view: &wgpu::TextureView,
         history_views: [&wgpu::TextureView; 2],
+        motion_vector_view: &wgpu::TextureView,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("temporal blend shader"),
@@ -43,6 +44,16 @@ impl TemporalBlendPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -96,6 +107,7 @@ impl TemporalBlendPass {
                 &bind_group_layout,
                 current_output_view,
                 history_view,
+                motion_vector_view,
                 &sampler,
             )
         });
@@ -113,6 +125,7 @@ impl TemporalBlendPass {
         device: &wgpu::Device,
         current_output_view: &wgpu::TextureView,
         history_views: [&wgpu::TextureView; 2],
+        motion_vector_view: &wgpu::TextureView,
     ) {
         self.bind_groups = history_views.map(|history_view| {
             Self::create_bind_group(
@@ -120,6 +133,7 @@ impl TemporalBlendPass {
                 &self.bind_group_layout,
                 current_output_view,
                 history_view,
+                motion_vector_view,
                 &self.sampler,
             )
         });
@@ -157,6 +171,7 @@ impl TemporalBlendPass {
         bind_group_layout: &wgpu::BindGroupLayout,
         current_output_view: &wgpu::TextureView,
         history_view: &wgpu::TextureView,
+        motion_vector_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -173,6 +188,10 @@ impl TemporalBlendPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::TextureView(motion_vector_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],

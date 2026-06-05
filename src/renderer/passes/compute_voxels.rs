@@ -1,8 +1,8 @@
 use crate::renderer::{
     DebugView,
     output::{
-        COARSE_DEPTH_TEXTURE_FORMAT, OUTPUT_TEXTURE_FORMAT, SHADING_INPUT_TEXTURE_FORMAT,
-        WORLD_POSITION_TEXTURE_FORMAT,
+        COARSE_DEPTH_TEXTURE_FORMAT, MOTION_VECTOR_TEXTURE_FORMAT, OUTPUT_TEXTURE_FORMAT,
+        SHADING_INPUT_TEXTURE_FORMAT, WORLD_POSITION_TEXTURE_FORMAT,
     },
 };
 
@@ -50,9 +50,11 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
+        motion_vector_view: &wgpu::TextureView,
         coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
+        previous_camera_buffer: &wgpu::Buffer,
         debug_visualization_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
     ) -> Self {
@@ -95,7 +97,7 @@ impl ComputeVoxelsPass {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 4,
+                        binding: 5,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
@@ -142,6 +144,16 @@ impl ComputeVoxelsPass {
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -150,7 +162,7 @@ impl ComputeVoxelsPass {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 5,
+                        binding: 6,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
@@ -160,11 +172,21 @@ impl ComputeVoxelsPass {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 6,
+                        binding: 7,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
                             format: SHADING_INPUT_TEXTURE_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: MOTION_VECTOR_TEXTURE_FORMAT,
                             view_dimension: wgpu::TextureViewDimension::D2,
                         },
                         count: None,
@@ -261,6 +283,16 @@ impl ComputeVoxelsPass {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let prepare_bind_group_layout =
@@ -278,7 +310,7 @@ impl ComputeVoxelsPass {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 6,
+                        binding: 7,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -399,9 +431,11 @@ impl ComputeVoxelsPass {
             &trace_bind_group_layout,
             world_position_view,
             shading_input_view,
+            motion_vector_view,
             coarse_depth_view,
             tlas,
             camera_buffer,
+            previous_camera_buffer,
             voxel_mask_buffer,
         );
         let visualize_scene_bind_group = Self::create_visualize_scene_bind_group(
@@ -416,6 +450,7 @@ impl ComputeVoxelsPass {
             output_view,
             world_position_view,
             shading_input_view,
+            motion_vector_view,
             debug_visualization_buffer,
             &shade_command_resources.count_buffer,
             &shade_command_resources.command_buffer,
@@ -459,9 +494,11 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
+        motion_vector_view: &wgpu::TextureView,
         coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
+        previous_camera_buffer: &wgpu::Buffer,
         debug_visualization_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
     ) {
@@ -482,9 +519,11 @@ impl ComputeVoxelsPass {
             &self.trace_bind_group_layout,
             world_position_view,
             shading_input_view,
+            motion_vector_view,
             coarse_depth_view,
             tlas,
             camera_buffer,
+            previous_camera_buffer,
             voxel_mask_buffer,
         );
         self.visualize_scene_bind_group = Self::create_visualize_scene_bind_group(
@@ -499,6 +538,7 @@ impl ComputeVoxelsPass {
             output_view,
             world_position_view,
             shading_input_view,
+            motion_vector_view,
             debug_visualization_buffer,
             &self.shade_command_count_buffer,
             &self.shade_command_buffer,
@@ -633,7 +673,7 @@ impl ComputeVoxelsPass {
                     resource: voxel_mask_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 5,
                     resource: wgpu::BindingResource::TextureView(coarse_depth_view),
                 },
             ],
@@ -645,9 +685,11 @@ impl ComputeVoxelsPass {
         bind_group_layout: &wgpu::BindGroupLayout,
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
+        motion_vector_view: &wgpu::TextureView,
         coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
+        previous_camera_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -668,15 +710,23 @@ impl ComputeVoxelsPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: previous_camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: wgpu::BindingResource::TextureView(coarse_depth_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 6,
                     resource: wgpu::BindingResource::TextureView(world_position_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
+                    binding: 7,
                     resource: wgpu::BindingResource::TextureView(shading_input_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(motion_vector_view),
                 },
             ],
         })
@@ -688,6 +738,7 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
+        motion_vector_view: &wgpu::TextureView,
         debug_visualization_buffer: &wgpu::Buffer,
         shade_command_count_buffer: &wgpu::Buffer,
         shade_command_buffer: &wgpu::Buffer,
@@ -720,6 +771,10 @@ impl ComputeVoxelsPass {
                     binding: 5,
                     resource: shade_command_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(motion_vector_view),
+                },
             ],
         })
     }
@@ -739,7 +794,7 @@ impl ComputeVoxelsPass {
                     resource: shade_command_count_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
+                    binding: 7,
                     resource: shade_dispatch_args_buffer.as_entire_binding(),
                 },
             ],

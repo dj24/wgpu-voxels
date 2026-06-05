@@ -265,6 +265,7 @@ impl ApplicationHandler for App {
                             KeyCode::Digit4 => Some(DebugView::Depth),
                             KeyCode::Digit5 => Some(DebugView::Normals),
                             KeyCode::Digit6 => Some(DebugView::SamplingRate),
+                            KeyCode::Digit7 => Some(DebugView::MotionVectors),
                             _ => None,
                         };
                         if let Some(debug_view) = debug_view {

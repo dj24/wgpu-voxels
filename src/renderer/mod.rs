@@ -14,7 +14,7 @@ use winit::{
 use crate::{
     InputState,
     scene::{
-        Camera, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN, OCCUPANCY_WORD_COUNT,
+        Camera, CameraUniform, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN, OCCUPANCY_WORD_COUNT,
         ProceduralAccelerationScene, RenderObject,
     },
 };
@@ -35,6 +35,7 @@ pub(crate) enum DebugView {
     Depth = 3,
     Normals = 4,
     SamplingRate = 5,
+    MotionVectors = 6,
 }
 
 struct PresentationPasses {
@@ -57,7 +58,10 @@ pub(crate) struct Renderer {
     camera: Camera,
     debug_view: DebugView,
     elapsed_seconds: f32,
+    current_camera_uniform: CameraUniform,
+    previous_camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
+    previous_camera_buffer: wgpu::Buffer,
     debug_visualization_params: DebugVisualizationParams,
     debug_visualization_buffer: wgpu::Buffer,
     voxel_mask_buffer: wgpu::Buffer,
@@ -92,13 +96,22 @@ impl Renderer {
         let camera = Camera::new();
         let debug_view = DebugView::Default;
         let size = context.current_size();
+        let camera_uniform = camera.to_uniform(size);
         let camera_buffer = context
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("camera buffer"),
-                contents: bytemuck::bytes_of(&camera.to_uniform(size)),
+                contents: bytemuck::bytes_of(&camera_uniform),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+        let previous_camera_buffer =
+            context
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("previous camera buffer"),
+                    contents: bytemuck::bytes_of(&camera_uniform),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
         let debug_visualization_params =
             debug_visualization_params(objects, &camera, debug_view, 0.0);
         let debug_visualization_buffer =
@@ -124,9 +137,11 @@ impl Renderer {
             output_target.view(),
             output_target.world_position_view(),
             output_target.shading_input_view(),
+            output_target.motion_vector_view(),
             output_target.coarse_depth_view(),
             procedural_scene.tlas(),
             &camera_buffer,
+            &previous_camera_buffer,
             &debug_visualization_buffer,
             &voxel_mask_buffer,
         );
@@ -134,6 +149,7 @@ impl Renderer {
             &context.device,
             output_target.view(),
             [output_target.history_view(0), output_target.history_view(1)],
+            output_target.motion_vector_view(),
         );
         let presentation = context.window.as_ref().map(|_| PresentationPasses {
             blit_pass: BlitPass::new(
@@ -149,7 +165,10 @@ impl Renderer {
             camera,
             debug_view,
             elapsed_seconds: 0.0,
+            current_camera_uniform: camera_uniform,
+            previous_camera_uniform: camera_uniform,
             camera_buffer,
+            previous_camera_buffer,
             debug_visualization_params,
             debug_visualization_buffer,
             voxel_mask_buffer,
@@ -232,9 +251,11 @@ impl Renderer {
             self.output_target.view(),
             self.output_target.world_position_view(),
             self.output_target.shading_input_view(),
+            self.output_target.motion_vector_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,
+            &self.previous_camera_buffer,
             &self.debug_visualization_buffer,
             &self.voxel_mask_buffer,
         );
@@ -278,15 +299,19 @@ impl Renderer {
             coarse_height,
             self.debug_view,
         );
-        self.accumulate_temporal_history(&mut encoder);
+        let present_view = if self.temporal_enabled() {
+            self.accumulate_temporal_history(&mut encoder);
+            self.output_target.history_view(self.temporal_history_index)
+        } else {
+            self.output_target.view()
+        };
         let presentation = self
             .presentation
             .as_mut()
             .ok_or_else(|| String::from("windowed render called on a headless renderer"))?;
-        presentation.blit_pass.rebind(
-            &self.context.device,
-            self.output_target.history_view(self.temporal_history_index),
-        );
+        presentation
+            .blit_pass
+            .rebind(&self.context.device, present_view);
         presentation.fps_overlay.update(
             &self.context.device,
             &self.context.queue,
@@ -315,6 +340,7 @@ impl Renderer {
         }
 
         self.context.queue.submit(Some(encoder.finish()));
+        self.advance_temporal_camera_state();
         self.context
             .window
             .as_ref()
@@ -342,19 +368,27 @@ impl Renderer {
             coarse_height,
             self.debug_view,
         );
-        self.accumulate_temporal_history(&mut encoder);
+        if self.temporal_enabled() {
+            self.accumulate_temporal_history(&mut encoder);
+        }
 
         self.context.queue.submit(Some(encoder.finish()));
+        self.advance_temporal_camera_state();
         Ok(())
     }
 
     pub(crate) fn save_headless_png(&self, path: &Path) -> Result<(), String> {
-        self.output_target.save_png(
-            &self.context.device,
-            &self.context.queue,
-            path,
-            self.temporal_history_index,
-        )
+        if self.temporal_enabled() {
+            self.output_target.save_png(
+                &self.context.device,
+                &self.context.queue,
+                path,
+                self.temporal_history_index,
+            )
+        } else {
+            self.output_target
+                .save_output_png(&self.context.device, &self.context.queue, path)
+        }
     }
 
     fn recreate_output_resources(&mut self) {
@@ -368,9 +402,11 @@ impl Renderer {
             self.output_target.view(),
             self.output_target.world_position_view(),
             self.output_target.shading_input_view(),
+            self.output_target.motion_vector_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
             &self.camera_buffer,
+            &self.previous_camera_buffer,
             &self.debug_visualization_buffer,
             &self.voxel_mask_buffer,
         );
@@ -381,6 +417,7 @@ impl Renderer {
                 self.output_target.history_view(0),
                 self.output_target.history_view(1),
             ],
+            self.output_target.motion_vector_view(),
         );
         self.reset_temporal_history();
         if let Some(presentation) = self.presentation.as_mut() {
@@ -409,13 +446,34 @@ impl Renderer {
     fn reset_temporal_history(&mut self) {
         self.temporal_history_index = 0;
         self.temporal_history_valid = false;
+        self.previous_camera_uniform = self.current_camera_uniform;
+        self.sync_previous_camera_buffer();
     }
 
-    fn update_camera_buffer(&self) {
-        let uniform = self.camera.to_uniform(self.context.current_size());
-        self.context
-            .queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
+    fn temporal_enabled(&self) -> bool {
+        matches!(self.debug_view, DebugView::Default)
+    }
+
+    fn update_camera_buffer(&mut self) {
+        self.current_camera_uniform = self.camera.to_uniform(self.context.current_size());
+        self.context.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::bytes_of(&self.current_camera_uniform),
+        );
+    }
+
+    fn sync_previous_camera_buffer(&self) {
+        self.context.queue.write_buffer(
+            &self.previous_camera_buffer,
+            0,
+            bytemuck::bytes_of(&self.previous_camera_uniform),
+        );
+    }
+
+    fn advance_temporal_camera_state(&mut self) {
+        self.previous_camera_uniform = self.current_camera_uniform;
+        self.sync_previous_camera_buffer();
     }
 
     fn update_debug_visualization_buffer(&self) {

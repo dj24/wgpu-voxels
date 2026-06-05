@@ -6,6 +6,8 @@ pub(crate) const WORLD_POSITION_TEXTURE_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba32Float;
 pub(crate) const SHADING_INPUT_TEXTURE_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba32Float;
+pub(crate) const MOTION_VECTOR_TEXTURE_FORMAT: wgpu::TextureFormat =
+    wgpu::TextureFormat::Rgba16Float;
 pub(crate) const COARSE_DEPTH_DIVISOR: u32 = 2;
 
 pub(crate) struct OutputTarget {
@@ -17,6 +19,8 @@ pub(crate) struct OutputTarget {
     world_position_view: wgpu::TextureView,
     _shading_input_texture: wgpu::Texture,
     shading_input_view: wgpu::TextureView,
+    _motion_vector_texture: wgpu::Texture,
+    motion_vector_view: wgpu::TextureView,
     _coarse_depth_texture: wgpu::Texture,
     coarse_depth_view: wgpu::TextureView,
     coarse_depth_size: (u32, u32),
@@ -102,6 +106,22 @@ impl OutputTarget {
         });
         let shading_input_view =
             shading_input_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let motion_vector_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("motion vector texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: MOTION_VECTOR_TEXTURE_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let motion_vector_view =
+            motion_vector_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let coarse_depth_size = coarse_depth_dimensions(width, height);
         let coarse_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("coarse depth texture"),
@@ -129,6 +149,8 @@ impl OutputTarget {
             world_position_view,
             _shading_input_texture: shading_input_texture,
             shading_input_view,
+            _motion_vector_texture: motion_vector_texture,
+            motion_vector_view,
             _coarse_depth_texture: coarse_depth_texture,
             coarse_depth_view,
             coarse_depth_size,
@@ -176,6 +198,10 @@ impl OutputTarget {
         &self.shading_input_view
     }
 
+    pub(crate) fn motion_vector_view(&self) -> &wgpu::TextureView {
+        &self.motion_vector_view
+    }
+
     pub(crate) fn coarse_depth_size(&self) -> (u32, u32) {
         self.coarse_depth_size
     }
@@ -188,6 +214,15 @@ impl OutputTarget {
         history_index: usize,
     ) -> Result<(), String> {
         self.save_texture_png(device, queue, &self.history_textures[history_index], path)
+    }
+
+    pub(crate) fn save_output_png(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: &Path,
+    ) -> Result<(), String> {
+        self.save_texture_png(device, queue, &self.output_texture, path)
     }
 
     fn save_texture_png(
