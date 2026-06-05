@@ -789,16 +789,8 @@ fn sampling_rate_debug_color(coverage: vec2<u32>, world_position: vec4<f32>) -> 
 }
 
 fn motion_vector_debug_color(motion_vector: vec4<f32>, background: vec3<f32>) -> vec3<f32> {
-    if (motion_vector.z < 0.5) {
-        return background;
-    }
-
-    let encoded = clamp(
-        motion_vector.xy * 8.0 + vec2<f32>(0.5),
-        vec2<f32>(0.0),
-        vec2<f32>(1.0),
-    );
-    return vec3<f32>(encoded, 0.5);
+    let encoded = clamp(abs(motion_vector.xy) * 16.0, vec2<f32>(0.0), vec2<f32>(1.0));
+    return vec3<f32>(encoded, 0.0);
 }
 
 fn local_index(local_id: vec2<u32>) -> u32 {
@@ -1032,9 +1024,10 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
 
         let local_voxel_center = (vec3<f32>(marched.cell) + vec3<f32>(0.5)) / f32(VOXEL_GRID_DIM);
+        let hit_world_position = ray_origin + ray_direction * hit_t;
         let world_position = (candidate.object_to_world * vec4<f32>(local_voxel_center, 1.0)).xyz;
         let world_normal = normalize((candidate.object_to_world * vec4<f32>(marched.normal, 0.0)).xyz);
-        let previous_uv = project_world_to_uv(previous_camera, world_position);
+        let previous_uv = project_world_to_uv(previous_camera, hit_world_position);
         stored_world_position = vec4<f32>(world_position, f32(accumulated_step_count) + 1.0);
         stored_shading_input = vec4<f32>(world_normal, f32(candidate.instance_custom_data));
         if (previous_uv.z > 0.5) {

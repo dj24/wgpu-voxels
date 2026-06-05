@@ -8,6 +8,12 @@ var history_texture: texture_2d<f32>;
 var motion_vector_texture: texture_2d<f32>;
 
 @group(0) @binding(3)
+var current_sampler: sampler;
+
+@group(0) @binding(4)
+var motion_sampler: sampler;
+
+@group(0) @binding(5)
 var history_sampler: sampler;
 
 struct VertexOutput {
@@ -33,8 +39,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let current = textureSample(current_texture, history_sampler, in.uv);
-    let motion_vector = textureSample(motion_vector_texture, history_sampler, in.uv);
+    let current = textureSample(current_texture, current_sampler, in.uv);
+    let motion_vector = textureSample(motion_vector_texture, motion_sampler, in.uv);
     if (motion_vector.z < 0.5) {
         return current;
     }

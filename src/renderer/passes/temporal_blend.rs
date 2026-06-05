@@ -3,7 +3,9 @@ use crate::renderer::output::OUTPUT_TEXTURE_FORMAT;
 pub(crate) struct TemporalBlendPass {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
-    sampler: wgpu::Sampler,
+    current_sampler: wgpu::Sampler,
+    history_sampler: wgpu::Sampler,
+    motion_sampler: wgpu::Sampler,
     bind_groups: [wgpu::BindGroup; 2],
 }
 
@@ -58,6 +60,18 @@ impl TemporalBlendPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -93,8 +107,22 @@ impl TemporalBlendPass {
             cache: None,
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("temporal blend sampler"),
+        let current_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("temporal blend current sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let history_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("temporal blend history sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let motion_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("temporal blend motion sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
@@ -108,14 +136,18 @@ impl TemporalBlendPass {
                 current_output_view,
                 history_view,
                 motion_vector_view,
-                &sampler,
+                &current_sampler,
+                &history_sampler,
+                &motion_sampler,
             )
         });
 
         Self {
             bind_group_layout,
             pipeline,
-            sampler,
+            current_sampler,
+            history_sampler,
+            motion_sampler,
             bind_groups,
         }
     }
@@ -134,7 +166,9 @@ impl TemporalBlendPass {
                 current_output_view,
                 history_view,
                 motion_vector_view,
-                &self.sampler,
+                &self.current_sampler,
+                &self.history_sampler,
+                &self.motion_sampler,
             )
         });
     }
@@ -172,7 +206,9 @@ impl TemporalBlendPass {
         current_output_view: &wgpu::TextureView,
         history_view: &wgpu::TextureView,
         motion_vector_view: &wgpu::TextureView,
-        sampler: &wgpu::Sampler,
+        current_sampler: &wgpu::Sampler,
+        history_sampler: &wgpu::Sampler,
+        motion_sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("temporal blend bind group"),
@@ -192,7 +228,15 @@ impl TemporalBlendPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::Sampler(current_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(motion_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(history_sampler),
                 },
             ],
         })
