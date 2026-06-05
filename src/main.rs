@@ -45,6 +45,7 @@ fn run_headless(output_path: &Path, delay: Duration) -> Result<(), Box<dyn std::
     let objects = collect_all_render_objects(&world);
     let mut renderer = pollster::block_on(Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &objects))?;
     std::thread::sleep(delay);
+    renderer.update_camera(&InputState::default(), delay.as_secs_f32());
     renderer.render_headless()?;
     renderer.save_headless_png(output_path)?;
     Ok(())

@@ -48,6 +48,7 @@ struct DebugVisualizationParams {
     world_min: [f32; 4],
     world_extent: [f32; 4],
     camera_position: [f32; 4],
+    sun_time_seconds: [f32; 4],
     debug_view: [u32; 4],
 }
 
@@ -55,6 +56,7 @@ pub(crate) struct Renderer {
     context: GpuContext,
     camera: Camera,
     debug_view: DebugView,
+    elapsed_seconds: f32,
     camera_buffer: wgpu::Buffer,
     debug_visualization_params: DebugVisualizationParams,
     debug_visualization_buffer: wgpu::Buffer,
@@ -94,7 +96,8 @@ impl Renderer {
                 contents: bytemuck::bytes_of(&camera.to_uniform(size)),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-        let debug_visualization_params = debug_visualization_params(objects, &camera, debug_view);
+        let debug_visualization_params =
+            debug_visualization_params(objects, &camera, debug_view, 0.0);
         let debug_visualization_buffer =
             Self::create_debug_visualization_buffer(&context.device, debug_visualization_params);
         let voxel_mask_buffer = Self::create_voxel_mask_buffer(&context.device, objects);
@@ -137,6 +140,7 @@ impl Renderer {
             context,
             camera,
             debug_view,
+            elapsed_seconds: 0.0,
             camera_buffer,
             debug_visualization_params,
             debug_visualization_buffer,
@@ -165,9 +169,11 @@ impl Renderer {
     }
 
     pub(crate) fn update_camera(&mut self, input: &InputState, delta_seconds: f32) {
+        self.elapsed_seconds += delta_seconds.max(0.0);
         self.camera.update(input, delta_seconds);
         self.update_camera_buffer();
         self.debug_visualization_params.camera_position = self.camera.position_uniform();
+        self.debug_visualization_params.sun_time_seconds = [self.elapsed_seconds, 0.0, 0.0, 0.0];
         self.update_debug_visualization_buffer();
     }
 
@@ -183,7 +189,7 @@ impl Renderer {
 
     pub(crate) fn sync_scene(&mut self, objects: &[RenderObject]) -> Result<(), String> {
         self.debug_visualization_params =
-            debug_visualization_params(objects, &self.camera, self.debug_view);
+            debug_visualization_params(objects, &self.camera, self.debug_view, self.elapsed_seconds);
         self.debug_visualization_buffer = Self::create_debug_visualization_buffer(
             &self.context.device,
             self.debug_visualization_params,
@@ -406,6 +412,7 @@ fn debug_visualization_params(
     objects: &[RenderObject],
     camera: &Camera,
     debug_view: DebugView,
+    elapsed_seconds: f32,
 ) -> DebugVisualizationParams {
     let mut world_min = [
         OBJECT_BOUNDS_MIN[0],
@@ -458,6 +465,7 @@ fn debug_visualization_params(
             0.0,
         ],
         camera_position: camera.position_uniform(),
+        sun_time_seconds: [elapsed_seconds, 0.0, 0.0, 0.0],
         debug_view: [debug_view as u32, 0, 0, 0],
     }
 }

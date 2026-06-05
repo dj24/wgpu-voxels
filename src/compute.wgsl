@@ -12,6 +12,7 @@ struct DebugVisualizationParams {
     world_min: vec4<f32>,
     world_extent: vec4<f32>,
     camera_position: vec4<f32>,
+    sun_time_seconds: vec4<f32>,
     debug_view: vec4<u32>,
 }
 
@@ -107,6 +108,7 @@ const DEBUG_VIEW_WORLD_POSITION: u32 = 2u;
 const DEBUG_VIEW_DEPTH: u32 = 3u;
 const DEBUG_VIEW_NORMALS: u32 = 4u;
 const DEBUG_VIEW_SAMPLING_RATE: u32 = 5u;
+const SUN_ROTATION_SPEED_RADIANS: f32 = 0.15;
 
 var<workgroup> shared_keys: array<vec4<f32>, 64>;
 var<workgroup> shared_valid: array<u32, 64>;
@@ -549,14 +551,21 @@ fn debug_background(uv: vec2<f32>) -> vec3<f32> {
 }
 
 fn shade_ndotl(base_color: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let light_direction = normalize(vec3<f32>(0.45, 0.8, 0.35));
-    let ndotl = saturate(dot(normalize(normal), light_direction));
+    let ndotl = saturate(dot(normalize(normal), sun_direction()));
     let diffuse = 0.15 + ndotl * 0.85;
     return base_color * diffuse;
 }
 
 fn sun_direction() -> vec3<f32> {
-    return normalize(vec3<f32>(0.45, 0.8, 0.35));
+    let base_direction = normalize(vec3<f32>(0.45, 0.8, 0.35));
+    let angle = debug_visualization.sun_time_seconds.x * SUN_ROTATION_SPEED_RADIANS;
+    let sin_angle = sin(angle);
+    let cos_angle = cos(angle);
+    return normalize(vec3<f32>(
+        base_direction.x * cos_angle - base_direction.z * sin_angle,
+        base_direction.y,
+        base_direction.x * sin_angle + base_direction.z * cos_angle,
+    ));
 }
 
 fn sample_min_coarse_depth(uv: vec2<f32>) -> f32 {
