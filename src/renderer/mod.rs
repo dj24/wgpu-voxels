@@ -22,7 +22,7 @@ use crate::{
 use self::{
     context::GpuContext,
     output::OutputTarget,
-    passes::{BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass},
+    passes::{BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass, TemporalBlendPass},
 };
 
 #[repr(u32)]
@@ -65,6 +65,9 @@ pub(crate) struct Renderer {
     output_target: OutputTarget,
     generate_voxels_pass: GenerateVoxelsPass,
     compute_pass: ComputeVoxelsPass,
+    temporal_blend_pass: TemporalBlendPass,
+    temporal_history_index: usize,
+    temporal_history_valid: bool,
     presentation: Option<PresentationPasses>,
 }
 
@@ -127,11 +130,16 @@ impl Renderer {
             &debug_visualization_buffer,
             &voxel_mask_buffer,
         );
+        let temporal_blend_pass = TemporalBlendPass::new(
+            &context.device,
+            output_target.view(),
+            [output_target.history_view(0), output_target.history_view(1)],
+        );
         let presentation = context.window.as_ref().map(|_| PresentationPasses {
             blit_pass: BlitPass::new(
                 &context.device,
                 context.surface_format(),
-                output_target.view(),
+                output_target.history_view(0),
             ),
             fps_overlay: FpsOverlay::new(&context.device, context.surface_format()),
         });
@@ -149,6 +157,9 @@ impl Renderer {
             output_target,
             generate_voxels_pass,
             compute_pass,
+            temporal_blend_pass,
+            temporal_history_index: 0,
+            temporal_history_valid: false,
             presentation,
         })
     }
@@ -185,11 +196,16 @@ impl Renderer {
         self.debug_view = debug_view;
         self.debug_visualization_params.debug_view = [debug_view as u32, 0, 0, 0];
         self.update_debug_visualization_buffer();
+        self.reset_temporal_history();
     }
 
     pub(crate) fn sync_scene(&mut self, objects: &[RenderObject]) -> Result<(), String> {
-        self.debug_visualization_params =
-            debug_visualization_params(objects, &self.camera, self.debug_view, self.elapsed_seconds);
+        self.debug_visualization_params = debug_visualization_params(
+            objects,
+            &self.camera,
+            self.debug_view,
+            self.elapsed_seconds,
+        );
         self.debug_visualization_buffer = Self::create_debug_visualization_buffer(
             &self.context.device,
             self.debug_visualization_params,
@@ -240,19 +256,10 @@ impl Renderer {
         let Some(frame) = self.context.acquire_frame()? else {
             return Ok(());
         };
-        let presentation = self
-            .presentation
-            .as_mut()
-            .ok_or_else(|| String::from("windowed render called on a headless renderer"))?;
 
         let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        presentation.fps_overlay.update(
-            &self.context.device,
-            &self.context.queue,
-            self.context.current_size(),
-        );
 
         let mut encoder =
             self.context
@@ -270,6 +277,20 @@ impl Renderer {
             coarse_width,
             coarse_height,
             self.debug_view,
+        );
+        self.accumulate_temporal_history(&mut encoder);
+        let presentation = self
+            .presentation
+            .as_mut()
+            .ok_or_else(|| String::from("windowed render called on a headless renderer"))?;
+        presentation.blit_pass.rebind(
+            &self.context.device,
+            self.output_target.history_view(self.temporal_history_index),
+        );
+        presentation.fps_overlay.update(
+            &self.context.device,
+            &self.context.queue,
+            self.context.current_size(),
         );
 
         {
@@ -321,14 +342,19 @@ impl Renderer {
             coarse_height,
             self.debug_view,
         );
+        self.accumulate_temporal_history(&mut encoder);
 
         self.context.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 
     pub(crate) fn save_headless_png(&self, path: &Path) -> Result<(), String> {
-        self.output_target
-            .save_png(&self.context.device, &self.context.queue, path)
+        self.output_target.save_png(
+            &self.context.device,
+            &self.context.queue,
+            path,
+            self.temporal_history_index,
+        )
     }
 
     fn recreate_output_resources(&mut self) {
@@ -348,11 +374,41 @@ impl Renderer {
             &self.debug_visualization_buffer,
             &self.voxel_mask_buffer,
         );
+        self.temporal_blend_pass.rebind(
+            &self.context.device,
+            self.output_target.view(),
+            [
+                self.output_target.history_view(0),
+                self.output_target.history_view(1),
+            ],
+        );
+        self.reset_temporal_history();
         if let Some(presentation) = self.presentation.as_mut() {
             presentation
                 .blit_pass
-                .rebind(&self.context.device, self.output_target.view());
+                .rebind(&self.context.device, self.output_target.history_view(0));
         }
+    }
+
+    fn accumulate_temporal_history(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let write_index = 1 - self.temporal_history_index;
+        if self.temporal_history_valid {
+            self.temporal_blend_pass.draw(
+                encoder,
+                self.output_target.history_view(write_index),
+                self.temporal_history_index,
+            );
+        } else {
+            self.output_target
+                .copy_output_to_history(encoder, write_index);
+            self.temporal_history_valid = true;
+        }
+        self.temporal_history_index = write_index;
+    }
+
+    fn reset_temporal_history(&mut self) {
+        self.temporal_history_index = 0;
+        self.temporal_history_valid = false;
     }
 
     fn update_camera_buffer(&self) {

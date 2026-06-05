@@ -11,6 +11,8 @@ pub(crate) const COARSE_DEPTH_DIVISOR: u32 = 2;
 pub(crate) struct OutputTarget {
     output_texture: wgpu::Texture,
     output_view: wgpu::TextureView,
+    history_textures: [wgpu::Texture; 2],
+    history_views: [wgpu::TextureView; 2],
     _world_position_texture: wgpu::Texture,
     world_position_view: wgpu::TextureView,
     _shading_input_texture: wgpu::Texture,
@@ -42,6 +44,32 @@ impl OutputTarget {
             view_formats: &[],
         });
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let history_textures = core::array::from_fn(|index| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(if index == 0 {
+                    "temporal history texture a"
+                } else {
+                    "temporal history texture b"
+                }),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: OUTPUT_TEXTURE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        let history_views = history_textures
+            .each_ref()
+            .map(|texture| texture.create_view(&Default::default()));
         let world_position_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("world position texture"),
             size: wgpu::Extent3d {
@@ -95,6 +123,8 @@ impl OutputTarget {
         Self {
             output_texture,
             output_view,
+            history_textures,
+            history_views,
             _world_position_texture: world_position_texture,
             world_position_view,
             _shading_input_texture: shading_input_texture,
@@ -118,6 +148,26 @@ impl OutputTarget {
         &self.coarse_depth_view
     }
 
+    pub(crate) fn history_view(&self, index: usize) -> &wgpu::TextureView {
+        &self.history_views[index]
+    }
+
+    pub(crate) fn copy_output_to_history(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        history_index: usize,
+    ) {
+        encoder.copy_texture_to_texture(
+            self.output_texture.as_image_copy(),
+            self.history_textures[history_index].as_image_copy(),
+            wgpu::Extent3d {
+                width: self.size.0,
+                height: self.size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     pub(crate) fn world_position_view(&self) -> &wgpu::TextureView {
         &self.world_position_view
     }
@@ -135,6 +185,17 @@ impl OutputTarget {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         path: &Path,
+        history_index: usize,
+    ) -> Result<(), String> {
+        self.save_texture_png(device, queue, &self.history_textures[history_index], path)
+    }
+
+    fn save_texture_png(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        path: &Path,
     ) -> Result<(), String> {
         let bytes_per_pixel = 4;
         let unpadded_bytes_per_row = self.size.0 * bytes_per_pixel;
@@ -151,7 +212,7 @@ impl OutputTarget {
             label: Some("headless readback encoder"),
         });
         encoder.copy_texture_to_buffer(
-            self.output_texture.as_image_copy(),
+            texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &readback_buffer,
                 layout: wgpu::TexelCopyBufferLayout {

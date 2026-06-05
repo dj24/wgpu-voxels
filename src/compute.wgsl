@@ -615,6 +615,42 @@ fn hash01(coord: vec2<u32>) -> f32 {
     return fract(value);
 }
 
+fn hash31(coord: vec3<f32>) -> f32 {
+    let value = sin(dot(coord, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453;
+    return fract(value);
+}
+
+fn cosine_weighted_hemisphere_sample(world_normal: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
+    let normal = normalize(world_normal);
+    let time = debug_visualization.sun_time_seconds.x;
+    let u1 = hash31(
+        world_position * 71.43
+            + normal * 13.17
+            + vec3<f32>(time * 0.73, time * 1.37, time * 2.11),
+    );
+    let u2 = hash31(world_position.zxy * 89.91 + normal.yzx * 7.31 + vec3<f32>(19.19, 73.73, 11.11));
+    let phi = 6.28318530718 * u1;
+    let radius = sqrt(u2);
+    let tangent_space = vec3<f32>(
+        cos(phi) * radius,
+        sin(phi) * radius,
+        sqrt(max(0.0, 1.0 - u2)),
+    );
+
+    var reference_axis = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(normal.y) > 0.999) {
+        reference_axis = vec3<f32>(1.0, 0.0, 0.0);
+    }
+
+    let tangent = normalize(cross(reference_axis, normal));
+    let bitangent = cross(normal, tangent);
+    return normalize(
+        tangent * tangent_space.x
+            + bitangent * tangent_space.y
+            + normal * tangent_space.z,
+    );
+}
+
 fn group_debug_color(base_color: vec3<f32>, group_coord: vec2<u32>) -> vec3<f32> {
     let noise = hash01(group_coord);
     let tint = mix(vec3<f32>(0.82, 0.88, 1.0), vec3<f32>(1.0, 0.86, 0.72), noise);
@@ -635,9 +671,10 @@ fn shade_from_input(shading_input: vec4<f32>) -> vec3<f32> {
 }
 
 fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
-    let ray_direction = sun_direction();
+    let normal = normalize(world_normal);
+    let ray_direction = cosine_weighted_hemisphere_sample(normal, world_position);
     let ray_origin =
-        world_position + ray_direction * voxel_size();
+        world_position + normal * voxel_size() + ray_direction * SHADOW_RAY_T_MIN;
 
     var query: ray_query;
     let ray = RayDesc(0u, 0xffu, SHADOW_RAY_T_MIN, SHADOW_RAY_T_MAX, ray_origin, ray_direction);
@@ -672,6 +709,7 @@ fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
 
 fn shaded_color(world_position: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32> {
     let visibility = sun_visibility(world_position, shading_input.xyz);
+    return vec3(visibility);
     return shade_from_input(shading_input) * mix(visibility, 1.0, 0.15);
 }
 
