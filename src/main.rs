@@ -262,6 +262,8 @@ impl ApplicationHandler for App {
                             KeyCode::Digit2 => Some(DebugView::Heatmap),
                             KeyCode::Digit3 => Some(DebugView::WorldPosition),
                             KeyCode::Digit4 => Some(DebugView::Depth),
+                            KeyCode::Digit5 => Some(DebugView::Normals),
+                            KeyCode::Digit6 => Some(DebugView::SamplingRate),
                             _ => None,
                         };
                         if let Some(debug_view) = debug_view {

@@ -30,6 +30,7 @@ pub(crate) struct ComputeVoxelsPass {
     emit_shade_commands_pipeline: wgpu::ComputePipeline,
     prepare_shade_dispatch_args_pipeline: wgpu::ComputePipeline,
     consume_shade_commands_pipeline: wgpu::ComputePipeline,
+    consume_sampling_rate_pipeline: wgpu::ComputePipeline,
     debug_visualization_pipeline: wgpu::ComputePipeline,
     shade_command_count_buffer: wgpu::Buffer,
     shade_command_buffer: wgpu::Buffer,
@@ -366,6 +367,15 @@ impl ComputeVoxelsPass {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
+        let consume_sampling_rate_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("consume sampling rate pipeline"),
+                layout: Some(&visualize_pipeline_layout),
+                module: &shader,
+                entry_point: Some("consume_sampling_rate_commands_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let debug_visualization_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("debug visualization pipeline"),
@@ -428,6 +438,7 @@ impl ComputeVoxelsPass {
             emit_shade_commands_pipeline,
             prepare_shade_dispatch_args_pipeline,
             consume_shade_commands_pipeline,
+            consume_sampling_rate_pipeline,
             debug_visualization_pipeline,
             shade_command_count_buffer: shade_command_resources.count_buffer,
             shade_command_buffer: shade_command_resources.command_buffer,
@@ -570,13 +581,16 @@ impl ComputeVoxelsPass {
                 label: Some("consume shade commands pass"),
                 timestamp_writes: None,
             });
-            consume_pass.set_pipeline(&self.consume_shade_commands_pipeline);
+            consume_pass.set_pipeline(match debug_view {
+                DebugView::SamplingRate => &self.consume_sampling_rate_pipeline,
+                _ => &self.consume_shade_commands_pipeline,
+            });
             consume_pass.set_bind_group(0, &self.visualize_scene_bind_group, &[]);
             consume_pass.set_bind_group(1, &self.visualize_bind_group, &[]);
             consume_pass.dispatch_workgroups_indirect(&self.shade_dispatch_args_buffer, 0);
         }
 
-        if matches!(debug_view, DebugView::Default) {
+        if matches!(debug_view, DebugView::Default | DebugView::SamplingRate) {
             return;
         }
 

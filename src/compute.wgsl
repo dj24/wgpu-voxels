@@ -105,6 +105,8 @@ const DEBUG_VIEW_DEFAULT: u32 = 0u;
 const DEBUG_VIEW_HEATMAP: u32 = 1u;
 const DEBUG_VIEW_WORLD_POSITION: u32 = 2u;
 const DEBUG_VIEW_DEPTH: u32 = 3u;
+const DEBUG_VIEW_NORMALS: u32 = 4u;
+const DEBUG_VIEW_SAMPLING_RATE: u32 = 5u;
 
 var<workgroup> shared_keys: array<vec4<f32>, 64>;
 var<workgroup> shared_valid: array<u32, 64>;
@@ -688,6 +690,24 @@ fn depth_debug_color(world_position: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(value);
 }
 
+fn normal_debug_color(shading_input: vec4<f32>) -> vec3<f32> {
+    return shading_input.xyz * 0.5 + vec3<f32>(0.5);
+}
+
+fn sampling_rate_debug_color(coverage: vec2<u32>, world_position: vec4<f32>) -> vec3<f32> {
+    if (!is_visible_surface(world_position)) {
+        return debug_background(vec2<f32>(0.0));
+    }
+
+    if (coverage.x == 4u && coverage.y == 4u) {
+        return vec3<f32>(1.0, 0.0, 0.0);
+    }
+    if (coverage.x == 2u && coverage.y == 2u) {
+        return vec3<f32>(0.0, 1.0, 0.0);
+    }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
 fn local_index(local_id: vec2<u32>) -> u32 {
     return local_id.y * 8u + local_id.x;
 }
@@ -1015,9 +1035,35 @@ fn consume_shade_command(command_index: u32) {
     broadcast_command_color(origin, coverage, color);
 }
 
+fn consume_sampling_rate_command(command_index: u32) {
+    let command_count = atomicLoad(&shade_command_count.value);
+    if (command_index >= command_count) {
+        return;
+    }
+
+    let command = shade_commands[command_index];
+    let origin = unpack_command_origin(command.x);
+    let coverage = coverage_size_from_mode(command.y);
+    let world_position = textureLoad(world_position_texture, vec2<i32>(origin), 0);
+    let dimensions = textureDimensions(world_position_texture);
+    let uv = (vec2<f32>(origin) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
+    let background = debug_background(uv);
+    let color = select(
+        background,
+        sampling_rate_debug_color(coverage, world_position),
+        is_visible_surface(world_position),
+    );
+    broadcast_command_color(origin, coverage, color);
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn consume_shade_commands_main(@builtin(global_invocation_id) id: vec3<u32>) {
     consume_shade_command(id.x);
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn consume_sampling_rate_commands_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    consume_sampling_rate_command(id.x);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1050,6 +1096,12 @@ fn debug_visualization_main(@builtin(global_invocation_id) id: vec3<u32>) {
         color = select(
             background,
             depth_debug_color(world_position.xyz),
+            is_visible_surface(world_position),
+        );
+    } else if (mode == DEBUG_VIEW_NORMALS) {
+        color = select(
+            background,
+            normal_debug_color(shading_input),
             is_visible_surface(world_position),
         );
     } else if (mode == DEBUG_VIEW_DEFAULT) {

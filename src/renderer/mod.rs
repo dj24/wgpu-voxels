@@ -33,6 +33,8 @@ pub(crate) enum DebugView {
     Heatmap = 1,
     WorldPosition = 2,
     Depth = 3,
+    Normals = 4,
+    SamplingRate = 5,
 }
 
 struct PresentationPasses {

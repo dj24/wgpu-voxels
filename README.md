@@ -64,7 +64,11 @@ The interactive renderer supports runtime debug view toggles:
 - `2` shows the heatmap view.
 - `3` shows normalized world-position output.
 - `4` shows final visible-surface depth from the full-resolution trace.
+- `5` shows world-space normals remapped into RGB.
+- `6` shows the sampling rate:
+  blue for `1x1`, green for `2x2`, and red for `4x4` shading.
 
-The debug views are applied as a fullscreen compute pass after the normal shaded
-frame is generated, so the default render path stays intact while debug output
-can be enabled on demand.
+Most debug views are applied as a fullscreen compute pass after the normal
+shaded frame is generated. The sampling-rate view reuses the emitted shade
+commands directly so it can display the active `1x1`/`2x2`/`4x4` command
+coverage.
