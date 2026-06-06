@@ -672,7 +672,7 @@ fn temporal_sample_seed(time: f32) -> vec3<f32> {
     );
 }
 
-fn uniform_hemisphere_sample(world_normal: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
+fn cosine_weighted_hemisphere_sample(world_normal: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
     let normal = normalize(world_normal);
     let time = debug_visualization.sun_time_seconds.x;
     let temporal_seed = temporal_sample_seed(time);
@@ -687,12 +687,11 @@ fn uniform_hemisphere_sample(world_normal: vec3<f32>, world_position: vec3<f32>)
             + temporal_seed.zxy * vec3<f32>(19.19, 73.73, 11.11),
     );
     let phi = 6.28318530718 * u1;
-    let z = u2;
-    let radius = sqrt(max(0.0, 1.0 - z * z));
+    let radius = sqrt(u2);
     let tangent_space = vec3<f32>(
         cos(phi) * radius,
         sin(phi) * radius,
-        z,
+        sqrt(max(0.0, 1.0 - u2)),
     );
 
     var reference_axis = vec3<f32>(0.0, 1.0, 0.0);
@@ -729,9 +728,9 @@ fn shade_from_input(base_color: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32
 
 fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
     let normal = normalize(world_normal);
-    let ray_direction = uniform_hemisphere_sample(normal, world_position);
+    let ray_direction = cosine_weighted_hemisphere_sample(normal, world_position);
     let ray_origin =
-        world_position + normal * voxel_size() + ray_direction * voxel_size();
+        world_position + ray_direction * voxel_size();
 
     var query: ray_query;
     let ray = RayDesc(0u, 0xffu, SHADOW_RAY_T_MIN, SHADOW_RAY_T_MAX, ray_origin, ray_direction);
