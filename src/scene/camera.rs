@@ -26,9 +26,9 @@ pub(crate) struct Camera {
 impl Camera {
     pub(crate) fn new() -> Self {
         Self {
-            position: Vec3::new(0.0, 1.2, 5.5),
+            position: Vec3::new(0.5, 0.5, 2.2),
             yaw: 0.0,
-            pitch: -0.16,
+            pitch: 0.0,
             vertical_fov_radians: FRAC_PI_3,
         }
     }

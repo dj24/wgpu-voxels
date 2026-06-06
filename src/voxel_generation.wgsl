@@ -39,6 +39,15 @@ const MAX_HEIGHT: f32 = 3.0;
 // Larger radii communicate broader implied form at the cost of local detail.
 const DSS_NORMAL_KERNEL_RADIUS: i32 = 2;
 const NORMAL_DITHER_MIN_DOT: f32 = 0.8;
+const CORNELL_WALL_THICKNESS: f32 = 0.055;
+const CORNELL_WHITE: vec3<f32> = vec3<f32>(0.82, 0.80, 0.76);
+const CORNELL_RED: vec3<f32> = vec3<f32>(0.74, 0.12, 0.10);
+const CORNELL_GREEN: vec3<f32> = vec3<f32>(0.16, 0.58, 0.16);
+
+struct SceneSdfSample {
+    distance: f32,
+    color: vec3<f32>,
+}
 
 fn voxel_size() -> f32 {
     return 1.0 / f32(VOXEL_GRID_DIM_U32);
@@ -156,27 +165,27 @@ fn noise3D(x: vec3<f32>) -> f32 {
     );
 }
 
-fn chunk_density_value(position: vec3<f32>) -> f32 {
+fn terrain_density_value(position: vec3<f32>) -> f32 {
     let squish_factor = position.y / MAX_HEIGHT;
     let noise = noise3D(position);
     return noise - squish_factor - 0.5;
 }
 
-fn chunk_density_filled(chunk_origin: vec3<f32>, voxel: vec3<u32>) -> bool {
-    return chunk_density_value(world_position_from_voxel(chunk_origin, voxel)) > 0.0;
+fn terrain_density_filled(chunk_origin: vec3<f32>, voxel: vec3<u32>) -> bool {
+    return terrain_density_value(world_position_from_voxel(chunk_origin, voxel)) > 0.0;
 }
 
-fn chunk_density_filled_i32(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> bool {
-    return chunk_density_value(world_position_from_voxel_i32(chunk_origin, voxel)) > 0.0;
+fn terrain_density_filled_i32(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> bool {
+    return terrain_density_value(world_position_from_voxel_i32(chunk_origin, voxel)) > 0.0;
 }
 
-fn voxel_has_exposed_side(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> bool {
-    return !chunk_density_filled_i32(chunk_origin, voxel + vec3<i32>(-1, 0, 0))
-        || !chunk_density_filled_i32(chunk_origin, voxel + vec3<i32>(1, 0, 0))
-        || !chunk_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, -1, 0))
-        || !chunk_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, 1, 0))
-        || !chunk_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, 0, -1))
-        || !chunk_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, 0, 1));
+fn terrain_voxel_has_exposed_side(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> bool {
+    return !terrain_density_filled_i32(chunk_origin, voxel + vec3<i32>(-1, 0, 0))
+        || !terrain_density_filled_i32(chunk_origin, voxel + vec3<i32>(1, 0, 0))
+        || !terrain_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, -1, 0))
+        || !terrain_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, 1, 0))
+        || !terrain_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, 0, -1))
+        || !terrain_density_filled_i32(chunk_origin, voxel + vec3<i32>(0, 0, 1));
 }
 
 fn gaussian_weight(dx: i32, dy: i32, dz: i32, radius: i32) -> f32 {
@@ -185,14 +194,14 @@ fn gaussian_weight(dx: i32, dy: i32, dz: i32, radius: i32) -> f32 {
     return exp(-d2 / (2.0 * sigma * sigma));
 }
 
-fn continuous_density_gradient(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
+fn terrain_continuous_density_gradient(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
     return vec3<f32>(
-        chunk_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(-1, 0, 0)))
-            - chunk_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(1, 0, 0))),
-        chunk_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, -1, 0)))
-            - chunk_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, 1, 0))),
-        chunk_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, 0, -1)))
-            - chunk_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, 0, 1))),
+        terrain_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(-1, 0, 0)))
+            - terrain_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(1, 0, 0))),
+        terrain_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, -1, 0)))
+            - terrain_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, 1, 0))),
+        terrain_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, 0, -1)))
+            - terrain_density_value(world_position_from_voxel_i32(chunk_origin, voxel + vec3<i32>(0, 0, 1))),
     );
 }
 
@@ -204,7 +213,7 @@ fn normalize_or(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     return fallback;
 }
 
-fn smoothed_density(chunk_origin: vec3<f32>, voxel: vec3<i32>, axis_to_ignore: i32) -> f32 {
+fn terrain_smoothed_density(chunk_origin: vec3<f32>, voxel: vec3<i32>, axis_to_ignore: i32) -> f32 {
     var sum = 0.0;
     var total = 0.0;
 
@@ -216,7 +225,7 @@ fn smoothed_density(chunk_origin: vec3<f32>, voxel: vec3<i32>, axis_to_ignore: i
                 let wz = select(dz, 0, axis_to_ignore == 2);
                 let weight = gaussian_weight(wx, wy, wz, DSS_NORMAL_KERNEL_RADIUS);
                 let sample_voxel = voxel + vec3<i32>(dx, dy, dz);
-                sum += select(0.0, 1.0, chunk_density_filled_i32(chunk_origin, sample_voxel))
+                sum += select(0.0, 1.0, terrain_density_filled_i32(chunk_origin, sample_voxel))
                     * weight;
                 total += weight;
             }
@@ -230,19 +239,19 @@ fn smoothed_density(chunk_origin: vec3<f32>, voxel: vec3<i32>, axis_to_ignore: i
     return sum / total;
 }
 
-fn dss_gradient_normal(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
+fn terrain_dss_gradient_normal(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
     let r = DSS_NORMAL_KERNEL_RADIUS;
     return vec3<f32>(
-        smoothed_density(chunk_origin, voxel + vec3<i32>(-r, 0, 0), 0)
-            - smoothed_density(chunk_origin, voxel + vec3<i32>(r, 0, 0), 0),
-        smoothed_density(chunk_origin, voxel + vec3<i32>(0, -r, 0), 1)
-            - smoothed_density(chunk_origin, voxel + vec3<i32>(0, r, 0), 1),
-        smoothed_density(chunk_origin, voxel + vec3<i32>(0, 0, -r), 2)
-            - smoothed_density(chunk_origin, voxel + vec3<i32>(0, 0, r), 2),
+        terrain_smoothed_density(chunk_origin, voxel + vec3<i32>(-r, 0, 0), 0)
+            - terrain_smoothed_density(chunk_origin, voxel + vec3<i32>(r, 0, 0), 0),
+        terrain_smoothed_density(chunk_origin, voxel + vec3<i32>(0, -r, 0), 1)
+            - terrain_smoothed_density(chunk_origin, voxel + vec3<i32>(0, r, 0), 1),
+        terrain_smoothed_density(chunk_origin, voxel + vec3<i32>(0, 0, -r), 2)
+            - terrain_smoothed_density(chunk_origin, voxel + vec3<i32>(0, 0, r), 2),
     );
 }
 
-fn dss_centroid_normal(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
+fn terrain_dss_centroid_normal(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
     var weighted_mass_offset = vec3<f32>(0.0);
     var total_weight = 0.0;
 
@@ -254,7 +263,7 @@ fn dss_centroid_normal(chunk_origin: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
                 }
 
                 let sample_voxel = voxel + vec3<i32>(dx, dy, dz);
-                if (!chunk_density_filled_i32(chunk_origin, sample_voxel)) {
+                if (!terrain_density_filled_i32(chunk_origin, sample_voxel)) {
                     continue;
                 }
 
@@ -361,14 +370,14 @@ fn pack_leaf_voxel(
         | ((packed_color_b & 0x3fu) << 26u);
 }
 
-fn voxel_payload(chunk_origin: vec3<f32>, object_index: u32, voxel: vec3<u32>) -> u32 {
+fn terrain_voxel_payload(chunk_origin: vec3<f32>, object_index: u32, voxel: vec3<u32>) -> u32 {
     let voxel_i32 = vec3<i32>(voxel);
-    if (!voxel_has_exposed_side(chunk_origin, voxel_i32)) {
+    if (!terrain_voxel_has_exposed_side(chunk_origin, voxel_i32)) {
         return pack_leaf_voxel(0u, vec3<f32>(0.0, 0.0, 0.0), palette(object_index), voxel);
     }
-    let dss_gradient = dss_gradient_normal(chunk_origin, voxel_i32);
-    let dss_centroid = dss_centroid_normal(chunk_origin, voxel_i32);
-    let continuous_gradient = continuous_density_gradient(chunk_origin, voxel_i32);
+    let dss_gradient = terrain_dss_gradient_normal(chunk_origin, voxel_i32);
+    let dss_centroid = terrain_dss_centroid_normal(chunk_origin, voxel_i32);
+    let continuous_gradient = terrain_continuous_density_gradient(chunk_origin, voxel_i32);
     let local_normal = normalize_or(
         dss_gradient,
         normalize_or(
@@ -378,6 +387,137 @@ fn voxel_payload(chunk_origin: vec3<f32>, object_index: u32, voxel: vec3<u32>) -
     );
     let color = palette(object_index);
     return pack_leaf_voxel(0u, local_normal, color, voxel);
+}
+
+fn sdf_box(point: vec3<f32>, half_extent: vec3<f32>) -> f32 {
+    let q = abs(point) - half_extent;
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+fn sdf_box_sample(
+    point: vec3<f32>,
+    center: vec3<f32>,
+    half_extent: vec3<f32>,
+    color: vec3<f32>,
+) -> SceneSdfSample {
+    return SceneSdfSample(sdf_box(point - center, half_extent), color);
+}
+
+fn union_sample(a: SceneSdfSample, b: SceneSdfSample) -> SceneSdfSample {
+    if (b.distance < a.distance) {
+        return b;
+    }
+    return a;
+}
+
+fn cornell_scene_sample(local_position: vec3<f32>) -> SceneSdfSample {
+    let wall_half = CORNELL_WALL_THICKNESS * 0.5;
+    var sample = sdf_box_sample(
+        local_position,
+        vec3<f32>(0.5, wall_half, 0.5),
+        vec3<f32>(0.5, wall_half, 0.5),
+        CORNELL_WHITE,
+    );
+    sample = union_sample(
+        sample,
+        sdf_box_sample(
+            local_position,
+            vec3<f32>(0.5, 1.0 - wall_half, 0.5),
+            vec3<f32>(0.5, wall_half, 0.5),
+            CORNELL_WHITE,
+        ),
+    );
+    sample = union_sample(
+        sample,
+        sdf_box_sample(
+            local_position,
+            vec3<f32>(0.5, 0.5, wall_half),
+            vec3<f32>(0.5, 0.5, wall_half),
+            CORNELL_WHITE,
+        ),
+    );
+    sample = union_sample(
+        sample,
+        sdf_box_sample(
+            local_position,
+            vec3<f32>(wall_half, 0.5, 0.5),
+            vec3<f32>(wall_half, 0.5, 0.5),
+            CORNELL_RED,
+        ),
+    );
+    sample = union_sample(
+        sample,
+        sdf_box_sample(
+            local_position,
+            vec3<f32>(1.0 - wall_half, 0.5, 0.5),
+            vec3<f32>(wall_half, 0.5, 0.5),
+            CORNELL_GREEN,
+        ),
+    );
+    sample = union_sample(
+        sample,
+        sdf_box_sample(
+            local_position,
+            vec3<f32>(0.33, 0.17, 0.34),
+            vec3<f32>(0.12, 0.17, 0.12),
+            CORNELL_WHITE,
+        ),
+    );
+    sample = union_sample(
+        sample,
+        sdf_box_sample(
+            local_position,
+            vec3<f32>(0.68, 0.31, 0.62),
+            vec3<f32>(0.13, 0.31, 0.13),
+            CORNELL_WHITE,
+        ),
+    );
+    return sample;
+}
+
+fn cornell_scene_distance(local_position: vec3<f32>) -> f32 {
+    return cornell_scene_sample(local_position).distance;
+}
+
+fn cornell_scene_normal(local_position: vec3<f32>) -> vec3<f32> {
+    let epsilon = voxel_size() * 0.75;
+    let gradient = vec3<f32>(
+        cornell_scene_distance(local_position + vec3<f32>(epsilon, 0.0, 0.0))
+            - cornell_scene_distance(local_position - vec3<f32>(epsilon, 0.0, 0.0)),
+        cornell_scene_distance(local_position + vec3<f32>(0.0, epsilon, 0.0))
+            - cornell_scene_distance(local_position - vec3<f32>(0.0, epsilon, 0.0)),
+        cornell_scene_distance(local_position + vec3<f32>(0.0, 0.0, epsilon))
+            - cornell_scene_distance(local_position - vec3<f32>(0.0, 0.0, epsilon)),
+    );
+    return normalize_or(gradient, vec3<f32>(0.0, 1.0, 0.0));
+}
+
+fn cornell_voxel_payload(voxel: vec3<u32>) -> u32 {
+    let local_position = (vec3<f32>(voxel) + vec3<f32>(0.5)) * voxel_size();
+    let sample = cornell_scene_sample(local_position);
+    return pack_leaf_voxel(0u, cornell_scene_normal(local_position), sample.color, voxel);
+}
+
+fn write_voxel_data(object_index: u32, voxel: vec3<u32>, payload: u32) {
+    let region = voxel >> vec3<u32>(3u);
+    let coarse_region = voxel >> vec3<u32>(4u);
+    let region_index = flatten_region_index(region);
+    let coarse_index = flatten_coarse_index(coarse_region);
+    let leaf_index = flatten_leaf_index(voxel & vec3<u32>(7u));
+    let dense_index = flatten_dense_voxel_index(voxel);
+
+    set_mask_bit(object_index, occupancy_word_index(region_index), region_index);
+    set_mask_bit(
+        object_index,
+        COARSE_MASK_WORD_OFFSET_U32 + occupancy_word_index(coarse_index),
+        coarse_index,
+    );
+    set_mask_bit(
+        object_index,
+        leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index),
+        leaf_index,
+    );
+    leaf_voxels[object_leaf_word_index(object_index, dense_index)] = payload;
 }
 
 @compute @workgroup_size(256, 1, 1)
@@ -405,7 +545,7 @@ fn clear_leaf_voxels_main(
 }
 
 @compute @workgroup_size(8, 8, 2)
-fn populate_chunk_noise_main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn populate_chunk_terrain_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let total_object_slices = generation_params.active_object_count * VOXEL_GRID_DIM_U32;
     if (id.x >= VOXEL_GRID_DIM_U32 || id.y >= VOXEL_GRID_DIM_U32 || id.z >= total_object_slices) {
         return;
@@ -416,29 +556,33 @@ fn populate_chunk_noise_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let object = chunk_objects[object_slot];
     let voxel = vec3<u32>(id.x, id.y, voxel_z);
 
-    if (!chunk_density_filled(object.chunk_origin.xyz, voxel)) {
+    if (!terrain_density_filled(object.chunk_origin.xyz, voxel)) {
         return;
     }
 
-    let object_index = object.object_index;
-    let region = voxel >> vec3<u32>(3u);
-    let coarse_region = voxel >> vec3<u32>(4u);
-    let region_index = flatten_region_index(region);
-    let coarse_index = flatten_coarse_index(coarse_region);
-    let leaf_index = flatten_leaf_index(voxel & vec3<u32>(7u));
-    let dense_index = flatten_dense_voxel_index(voxel);
+    write_voxel_data(
+        object.object_index,
+        voxel,
+        terrain_voxel_payload(object.chunk_origin.xyz, object.object_index, voxel),
+    );
+}
 
-    set_mask_bit(object_index, occupancy_word_index(region_index), region_index);
-    set_mask_bit(
-        object_index,
-        COARSE_MASK_WORD_OFFSET_U32 + occupancy_word_index(coarse_index),
-        coarse_index,
-    );
-    set_mask_bit(
-        object_index,
-        leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index),
-        leaf_index,
-    );
-    leaf_voxels[object_leaf_word_index(object_index, dense_index)] =
-        voxel_payload(object.chunk_origin.xyz, object_index, voxel);
+@compute @workgroup_size(8, 8, 2)
+fn populate_chunk_cornell_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let total_object_slices = generation_params.active_object_count * VOXEL_GRID_DIM_U32;
+    if (id.x >= VOXEL_GRID_DIM_U32 || id.y >= VOXEL_GRID_DIM_U32 || id.z >= total_object_slices) {
+        return;
+    }
+
+    let object_slot = id.z / VOXEL_GRID_DIM_U32;
+    let voxel_z = id.z % VOXEL_GRID_DIM_U32;
+    let object = chunk_objects[object_slot];
+    let voxel = vec3<u32>(id.x, id.y, voxel_z);
+    let local_position = (vec3<f32>(voxel) + vec3<f32>(0.5)) * voxel_size();
+
+    if (cornell_scene_distance(local_position) > 0.0) {
+        return;
+    }
+
+    write_voxel_data(object.object_index, voxel, cornell_voxel_payload(voxel));
 }
