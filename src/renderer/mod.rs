@@ -150,6 +150,12 @@ impl Renderer {
             output_target.view(),
             [output_target.history_view(0), output_target.history_view(1)],
             output_target.motion_vector_view(),
+            output_target.world_position_view(),
+            [
+                output_target.history_world_position_view(0),
+                output_target.history_world_position_view(1),
+            ],
+            &previous_camera_buffer,
         );
         let presentation = context.window.as_ref().map(|_| PresentationPasses {
             blit_pass: BlitPass::new(
@@ -418,6 +424,12 @@ impl Renderer {
                 self.output_target.history_view(1),
             ],
             self.output_target.motion_vector_view(),
+            self.output_target.world_position_view(),
+            [
+                self.output_target.history_world_position_view(0),
+                self.output_target.history_world_position_view(1),
+            ],
+            &self.previous_camera_buffer,
         );
         self.reset_temporal_history();
         if let Some(presentation) = self.presentation.as_mut() {
@@ -435,9 +447,13 @@ impl Renderer {
                 self.output_target.history_view(write_index),
                 self.temporal_history_index,
             );
+            self.output_target
+                .copy_world_position_to_history(encoder, write_index);
         } else {
             self.output_target
                 .copy_output_to_history(encoder, write_index);
+            self.output_target
+                .copy_world_position_to_history(encoder, write_index);
             self.temporal_history_valid = true;
         }
         self.temporal_history_index = write_index;

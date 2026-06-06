@@ -1,4 +1,7 @@
-use crate::renderer::output::OUTPUT_TEXTURE_FORMAT;
+use crate::{
+    renderer::output::OUTPUT_TEXTURE_FORMAT,
+    scene::CameraUniform,
+};
 
 pub(crate) struct TemporalBlendPass {
     bind_group_layout: wgpu::BindGroupLayout,
@@ -15,6 +18,9 @@ impl TemporalBlendPass {
         current_output_view: &wgpu::TextureView,
         history_views: [&wgpu::TextureView; 2],
         motion_vector_view: &wgpu::TextureView,
+        current_world_position_view: &wgpu::TextureView,
+        history_world_position_views: [&wgpu::TextureView; 2],
+        previous_camera_buffer: &wgpu::Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("temporal blend shader"),
@@ -57,17 +63,50 @@ impl TemporalBlendPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            wgpu::BufferSize::new(core::mem::size_of::<CameraUniform>() as u64)
+                                .expect("camera uniform size must be non-zero"),
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -129,13 +168,16 @@ impl TemporalBlendPass {
             ..Default::default()
         });
 
-        let bind_groups = history_views.map(|history_view| {
+        let bind_groups = core::array::from_fn(|index| {
             Self::create_bind_group(
                 device,
                 &bind_group_layout,
                 current_output_view,
-                history_view,
+                history_views[index],
                 motion_vector_view,
+                current_world_position_view,
+                history_world_position_views[index],
+                previous_camera_buffer,
                 &current_sampler,
                 &history_sampler,
                 &motion_sampler,
@@ -158,14 +200,20 @@ impl TemporalBlendPass {
         current_output_view: &wgpu::TextureView,
         history_views: [&wgpu::TextureView; 2],
         motion_vector_view: &wgpu::TextureView,
+        current_world_position_view: &wgpu::TextureView,
+        history_world_position_views: [&wgpu::TextureView; 2],
+        previous_camera_buffer: &wgpu::Buffer,
     ) {
-        self.bind_groups = history_views.map(|history_view| {
+        self.bind_groups = core::array::from_fn(|index| {
             Self::create_bind_group(
                 device,
                 &self.bind_group_layout,
                 current_output_view,
-                history_view,
+                history_views[index],
                 motion_vector_view,
+                current_world_position_view,
+                history_world_position_views[index],
+                previous_camera_buffer,
                 &self.current_sampler,
                 &self.history_sampler,
                 &self.motion_sampler,
@@ -206,6 +254,9 @@ impl TemporalBlendPass {
         current_output_view: &wgpu::TextureView,
         history_view: &wgpu::TextureView,
         motion_vector_view: &wgpu::TextureView,
+        current_world_position_view: &wgpu::TextureView,
+        history_world_position_view: &wgpu::TextureView,
+        previous_camera_buffer: &wgpu::Buffer,
         current_sampler: &wgpu::Sampler,
         history_sampler: &wgpu::Sampler,
         motion_sampler: &wgpu::Sampler,
@@ -228,14 +279,26 @@ impl TemporalBlendPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::Sampler(current_sampler),
+                    resource: wgpu::BindingResource::TextureView(current_world_position_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::Sampler(motion_sampler),
+                    resource: wgpu::BindingResource::TextureView(history_world_position_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
+                    resource: previous_camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(current_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(motion_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
                     resource: wgpu::BindingResource::Sampler(history_sampler),
                 },
             ],

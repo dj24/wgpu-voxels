@@ -17,6 +17,8 @@ pub(crate) struct OutputTarget {
     history_views: [wgpu::TextureView; 2],
     _world_position_texture: wgpu::Texture,
     world_position_view: wgpu::TextureView,
+    history_world_position_textures: [wgpu::Texture; 2],
+    history_world_position_views: [wgpu::TextureView; 2],
     _shading_input_texture: wgpu::Texture,
     shading_input_view: wgpu::TextureView,
     _motion_vector_texture: wgpu::Texture,
@@ -85,11 +87,36 @@ impl OutputTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: WORLD_POSITION_TEXTURE_FORMAT,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let world_position_view =
             world_position_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let history_world_position_textures = core::array::from_fn(|index| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(if index == 0 {
+                    "temporal history world position texture a"
+                } else {
+                    "temporal history world position texture b"
+                }),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: WORLD_POSITION_TEXTURE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        let history_world_position_views = history_world_position_textures
+            .each_ref()
+            .map(|texture| texture.create_view(&Default::default()));
         let shading_input_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shading input texture"),
             size: wgpu::Extent3d {
@@ -147,6 +174,8 @@ impl OutputTarget {
             history_views,
             _world_position_texture: world_position_texture,
             world_position_view,
+            history_world_position_textures,
+            history_world_position_views,
             _shading_input_texture: shading_input_texture,
             shading_input_view,
             _motion_vector_texture: motion_vector_texture,
@@ -192,6 +221,26 @@ impl OutputTarget {
 
     pub(crate) fn world_position_view(&self) -> &wgpu::TextureView {
         &self.world_position_view
+    }
+
+    pub(crate) fn history_world_position_view(&self, index: usize) -> &wgpu::TextureView {
+        &self.history_world_position_views[index]
+    }
+
+    pub(crate) fn copy_world_position_to_history(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        history_index: usize,
+    ) {
+        encoder.copy_texture_to_texture(
+            self._world_position_texture.as_image_copy(),
+            self.history_world_position_textures[history_index].as_image_copy(),
+            wgpu::Extent3d {
+                width: self.size.0,
+                height: self.size.1,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     pub(crate) fn shading_input_view(&self) -> &wgpu::TextureView {
