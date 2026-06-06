@@ -1,7 +1,4 @@
-use crate::{
-    renderer::output::OUTPUT_TEXTURE_FORMAT,
-    scene::CameraUniform,
-};
+use crate::{renderer::output::OUTPUT_TEXTURE_FORMAT, scene::CameraUniform};
 
 pub(crate) struct TemporalBlendPass {
     bind_group_layout: wgpu::BindGroupLayout,

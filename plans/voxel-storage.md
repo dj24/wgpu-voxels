@@ -1,11 +1,11 @@
 # Voxel Storage Plan
 
-The goal of the renderer is to compress voxel data so we can render more world
-space on screen without making the data model unreasonably complex.
+The goal of the renderer is to store enough shading data per voxel that the GPU
+can shade directly from voxel memory, while still skipping empty space at the
+chunk and region level.
 
-This plan keeps the useful parts of the `ash-voxels` storage design, but
-describes them in renderer-agnostic terms so they can be implemented cleanly in
-this `wgpu-voxels` prototype.
+This version removes the palette idea entirely. Instead, every stored voxel owns
+one fixed `u32` payload that packs material id, normal, and color together.
 
 ## Working Assumptions
 
@@ -15,6 +15,8 @@ These simplifications keep the first version manageable:
 * All voxels are axis aligned.
 * Voxels are stored in world chunks.
 * The first version should optimize for static or infrequently rebuilt chunks.
+* The main storage win comes from eliding empty regions, not from per-region
+  color deduplication.
 
 ## Current Repo Status
 
@@ -26,7 +28,7 @@ The repo already has the first half of this layout in `src/scene/voxel_mask.rs`:
 * Per-region `8x8x8` leaf occupancy masks
 
 That existing bitmask layout is a good staging point, even if we later replace
-the per-region leaf masks with a tighter palette-driven payload.
+the per-region leaf masks with fixed packed-voxel payloads.
 
 ## Chunks
 
@@ -38,66 +40,83 @@ the per-region leaf masks with a tighter palette-driven payload.
 
 Byte-aligned layout:
 
-| Byte Size | Stored                    | Notes                                               |
-|-----------|---------------------------|-----------------------------------------------------|
-| 12        | World position            | `i32 x, y, z` chunk coordinates                     |
-| 64        | Region occupancy bitfield | One bit per `8x8x8` region                          |
-| 2,048     | 512 region headers        | One fixed-size header per region                    |
+| Byte Size | Stored                    | Notes                           |
+|-----------|---------------------------|---------------------------------|
+| 12        | World position            | `i32 x, y, z` chunk coordinates |
+| 64        | Region occupancy bitfield | One bit per `8x8x8` region      |
+| 2,048     | 512 region headers        | One fixed-size header per region |
 
 Packed size: `2,124` bytes per chunk before region payload blobs.
 
 ## Regions
 
-* Each chunk is divided into `512` `8x8x8` palette regions.
+* Each chunk is divided into `512` `8x8x8` regions.
 * Each region covers `512` voxels.
-* Each voxel stores a palette index instead of a full material value.
-* The index bit width depends on the palette size for that region.
+* Each stored voxel uses one fixed `32`-bit packed value.
+* Empty regions do not allocate voxel payload storage.
+* Non-empty regions allocate a dense `512`-voxel payload.
 
-Examples:
-
-* A region with `2` distinct values needs `1` bit per voxel.
-* A region with `15` distinct values needs `4` bits per voxel.
-* A region with `255` distinct values needs `8` bits per voxel.
-
-Initial constraint:
-
-* Cap palette size at `255` entries for the first implementation.
-* Treat larger material variety as an overflow case to design later if needed.
+This is simpler than the palette design. It gives up low-variety compression,
+but it makes decode trivial and keeps every voxel self-contained.
 
 ### Region Header
 
 Byte-aligned layout:
 
-| Byte Size | Stored         | Notes                                                   |
-|-----------|----------------|---------------------------------------------------------|
-| 1         | Palette length | `0` means empty region, `1..255` are valid sizes        |
-| 3         | Blob pointer   | Offset into a chunk-local or arena allocation of blobs  |
+| Byte Size | Stored       | Notes                                                  |
+|-----------|--------------|--------------------------------------------------------|
+| 1         | Region state | `0` empty, `1` packed voxel payload present            |
+| 3         | Blob pointer | Offset into a chunk-local or arena allocation of blobs |
 
 Notes:
 
 * Empty regions do not allocate blob storage.
 * The pointer can be an offset rather than a raw address.
-* For `wgpu`, this should map naturally to offsets inside one or more storage
+* For `wgpu`, this maps naturally to offsets inside one or more storage
   buffers rather than backend-specific resource handles.
 
 ## Region Blob
 
-Each non-empty region owns a variable-sized blob containing:
+Each non-empty region owns one fixed-size blob:
 
-| Byte Size                                      | Stored           | Notes                                      |
-|------------------------------------------------|------------------|--------------------------------------------|
-| `2 * palette_size`                             | Palette swatches | Fixed `2` bytes per swatch in the first pass |
-| `ceil(voxel_count * palette_index_bits / 8)`   | Palette indices  | Bit-packed indices for the `512` voxels    |
+| Byte Size | Stored        | Notes                                |
+|-----------|---------------|--------------------------------------|
+| `2,048`   | Packed voxels | `512` voxels * `4` bytes per voxel   |
 
 Where:
 
 * `voxel_count = 512`
-* `palette_index_bits = ceil(log2(palette_size))`, with a minimum of `1` for a
-  non-empty region
+* `bytes_per_voxel = 4`
 
-This is the main compression win: sparse or low-variety regions stay very
-small, while dense high-variety regions still avoid paying for a full dense
-material array.
+The region payload is always dense once a region is present. Compression now
+comes from skipping empty regions entirely rather than shrinking individual
+region payloads.
+
+## Packed Voxel Word
+
+Each stored voxel is one `u32` with this bit layout:
+
+| Bit Range | Bit Size | Stored         |
+|-----------|----------|----------------|
+| `0..1`    | 2        | `material_type` |
+| `2..5`    | 4        | `normal.x`     |
+| `6..9`    | 4        | `normal.y`     |
+| `10..13`  | 4        | `normal.z`     |
+| `14..19`  | 6        | `color.r`      |
+| `20..25`  | 6        | `color.g`      |
+| `26..31`  | 6        | `color.b`      |
+
+Total: `32` bits.
+
+Notes:
+
+* `material_type` supports `4` material classes.
+* Normals are stored as `vec3` components with `4` bits per axis.
+* Colors are stored as `RGB666`.
+* Shader decode should unpack into normalized float ranges on load.
+* If we keep explicit occupancy masks, all `4` material ids stay available.
+* If we later infer occupancy from the voxel word, one material id may need to
+  become the "empty" sentinel.
 
 ## Example Chunk Sizes
 
@@ -105,47 +124,25 @@ Assumptions for the table below:
 
 * Chunk dimensions are `64x64x64` (`262,144` voxels).
 * Regions are `8x8x8` (`512` voxels per region, `512` regions per chunk).
-* Exactly `2` voxel colors are used, so palette indices cost `1` bit per
-  occupied voxel in each populated region.
 * Region headers are already included in the fixed chunk cost.
 * Blob payloads are only allocated for non-empty regions.
-* `2` colors means each populated region stores `4` bytes of swatches.
-* A populated `8x8x8` region stores `64` bytes of packed indices.
-* Total bytes = `2,124 + populated_regions * 68`.
+* Each populated region costs `2,048` bytes.
+* Total bytes = `2,124 + populated_regions * 2,048`.
 
-| Chunk Fill | Occupied Voxels | Populated Regions | Total Bytes | Total KiB | Reduction vs dense `u16` array |
-|------------|-----------------|-------------------|-------------|-----------|-------------------------------|
-| 0%         | 0               | 0                 | 2,124       | 2.07      | 99.59%                        |
-| 25%        | 65,536          | 128               | 10,828      | 10.57     | 97.93%                        |
-| 50%        | 131,072         | 256               | 19,532      | 19.07     | 96.27%                        |
-| 100%       | 262,144         | 512               | 36,940      | 36.07     | 92.95%                        |
+| Chunk Fill | Occupied Voxels | Populated Regions | Total Bytes | Total KiB | Reduction vs dense `u32` array |
+|------------|-----------------|-------------------|-------------|-----------|--------------------------------|
+| 0%         | 0               | 0                 | 2,124       | 2.07      | 99.80%                         |
+| 25%        | 65,536          | 128               | 264,268     | 258.07    | 74.80%                         |
+| 50%        | 131,072         | 256               | 526,412     | 514.07    | 49.80%                         |
+| 100%       | 262,144         | 512               | 1,050,700   | 1,026.07  | -0.20%                         |
 
-For comparison, a dense `u16` material array would use
-`262,144 * 2 = 524,288` bytes (`512 KiB`) per chunk.
+For comparison, a dense `u32` voxel array would use
+`262,144 * 4 = 1,048,576` bytes (`1,024 KiB`) per chunk.
 
-## Palette Swatch
-
-First-pass swatches can stay at `2` bytes each.
-
-This is enough for a compact prototype material model without overcommitting to
-full PBR data too early.
-
-Suggested bit split:
-
-| Bit Size | Stored     |
-|----------|------------|
-| 3        | Voxel type |
-| 4        | Red        |
-| 5        | Green      |
-| 4        | Blue       |
-
-Notes:
-
-* `3` bits for voxel type gives `8` coarse material classes.
-* RGB `4:5:4` is intentionally low precision, but works well for a stylized
-  look.
-* If we want smoother gradients later, we can add shader-side dithering instead
-  of inflating storage immediately.
+At full occupancy this layout is slightly larger than a monolithic dense array
+because of the chunk and region headers. That is acceptable for the prototype:
+the point of the hierarchy is to avoid paying for empty space and to preserve a
+clean traversal structure for later streaming work.
 
 ## Editing Strategy
 
@@ -153,9 +150,8 @@ For the prototype, keep edits simple:
 
 * Large-scale gameplay edits can be applied on the CPU, then rebuild the
   affected chunk from source voxel data.
-* Small procedural animation that does not change palette cardinality could be
-  handled in GPU code later, but it should not be part of the first storage
-  implementation.
+* Small procedural animation should be treated as a full chunk or region rebuild
+  unless we later prove that partial repacking is worth the complexity.
 
 This favors correctness and iteration speed over fully dynamic in-place updates.
 
@@ -167,19 +163,20 @@ The most practical migration path in `wgpu-voxels` looks like this:
 2. Split the current monolithic occupancy representation into:
    * a compact chunk header buffer
    * a region-header buffer
-   * a blob buffer for palette data and packed indices
+   * a blob buffer containing packed `u32` voxel payloads
 3. Start with CPU-built chunks uploaded into storage buffers.
 4. Update traversal code to:
    * test the chunk region mask first
    * fetch the region header
-   * decode palette indices from the region blob
-   * map the palette swatch to shading data
-5. Only revisit streaming, paging, and defragmentation once the static format is
+   * compute the local voxel index inside the `8x8x8` region
+   * unpack the `u32` voxel payload into material, normal, and color
+5. Keep occupancy masks initially so shader-side migration stays easy.
+6. Only revisit streaming, paging, and defragmentation once the static format is
    working end to end.
 
 One likely transitional step is to keep the current per-region leaf masks during
-debugging, then replace them with packed palette indices once the data upload and
-shader decode path is stable.
+debugging, then decide whether they stay as the long-term occupancy source or
+whether occupancy can be inferred directly from the packed voxel word.
 
 ## Outstanding Design Work
 
@@ -187,6 +184,7 @@ shader decode path is stable.
 * Blob allocation strategy
 * Defragmentation and recycling of freed blob space
 * Chunk streaming and paging
-* Material and voxel-type catalog
+* Material-type catalog for the `2`-bit `material_type`
+* Normal quantization and decode scheme for the `4`-bit axes
 * Edit pipeline for persistent world changes
-* Whether leaf occupancy should be explicit or inferred from palette indices
+* Whether occupancy stays explicit or is inferred from packed voxels

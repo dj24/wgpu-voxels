@@ -2,7 +2,7 @@ use crate::renderer::{
     DebugView,
     output::{
         COARSE_DEPTH_TEXTURE_FORMAT, MOTION_VECTOR_TEXTURE_FORMAT, OUTPUT_TEXTURE_FORMAT,
-        SHADING_INPUT_TEXTURE_FORMAT, WORLD_POSITION_TEXTURE_FORMAT,
+        SHADING_INPUT_TEXTURE_FORMAT, SURFACE_COLOR_TEXTURE_FORMAT, WORLD_POSITION_TEXTURE_FORMAT,
     },
 };
 
@@ -50,6 +50,7 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
+        surface_color_view: &wgpu::TextureView,
         motion_vector_view: &wgpu::TextureView,
         coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
@@ -57,6 +58,7 @@ impl ComputeVoxelsPass {
         previous_camera_buffer: &wgpu::Buffer,
         debug_visualization_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
+        leaf_voxel_buffer: &wgpu::Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("voxel compute shader"),
@@ -103,6 +105,16 @@ impl ComputeVoxelsPass {
                             access: wgpu::StorageTextureAccess::WriteOnly,
                             format: COARSE_DEPTH_TEXTURE_FORMAT,
                             view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -191,6 +203,26 @@ impl ComputeVoxelsPass {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: SURFACE_COLOR_TEXTURE_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -208,6 +240,16 @@ impl ComputeVoxelsPass {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -285,6 +327,16 @@ impl ComputeVoxelsPass {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -425,24 +477,28 @@ impl ComputeVoxelsPass {
             tlas,
             camera_buffer,
             voxel_mask_buffer,
+            leaf_voxel_buffer,
         );
         let trace_bind_group = Self::create_trace_bind_group(
             device,
             &trace_bind_group_layout,
             world_position_view,
             shading_input_view,
+            surface_color_view,
             motion_vector_view,
             coarse_depth_view,
             tlas,
             camera_buffer,
             previous_camera_buffer,
             voxel_mask_buffer,
+            leaf_voxel_buffer,
         );
         let visualize_scene_bind_group = Self::create_visualize_scene_bind_group(
             device,
             &visualize_scene_bind_group_layout,
             tlas,
             voxel_mask_buffer,
+            leaf_voxel_buffer,
         );
         let visualize_bind_group = Self::create_visualize_bind_group(
             device,
@@ -451,6 +507,7 @@ impl ComputeVoxelsPass {
             world_position_view,
             shading_input_view,
             motion_vector_view,
+            surface_color_view,
             debug_visualization_buffer,
             &shade_command_resources.count_buffer,
             &shade_command_resources.command_buffer,
@@ -494,6 +551,7 @@ impl ComputeVoxelsPass {
         output_view: &wgpu::TextureView,
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
+        surface_color_view: &wgpu::TextureView,
         motion_vector_view: &wgpu::TextureView,
         coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
@@ -501,6 +559,7 @@ impl ComputeVoxelsPass {
         previous_camera_buffer: &wgpu::Buffer,
         debug_visualization_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
+        leaf_voxel_buffer: &wgpu::Buffer,
     ) {
         let shade_command_resources = Self::create_shade_command_resources(device, width, height);
         self.shade_command_count_buffer = shade_command_resources.count_buffer;
@@ -513,24 +572,28 @@ impl ComputeVoxelsPass {
             tlas,
             camera_buffer,
             voxel_mask_buffer,
+            leaf_voxel_buffer,
         );
         self.trace_bind_group = Self::create_trace_bind_group(
             device,
             &self.trace_bind_group_layout,
             world_position_view,
             shading_input_view,
+            surface_color_view,
             motion_vector_view,
             coarse_depth_view,
             tlas,
             camera_buffer,
             previous_camera_buffer,
             voxel_mask_buffer,
+            leaf_voxel_buffer,
         );
         self.visualize_scene_bind_group = Self::create_visualize_scene_bind_group(
             device,
             &self.visualize_scene_bind_group_layout,
             tlas,
             voxel_mask_buffer,
+            leaf_voxel_buffer,
         );
         self.visualize_bind_group = Self::create_visualize_bind_group(
             device,
@@ -539,6 +602,7 @@ impl ComputeVoxelsPass {
             world_position_view,
             shading_input_view,
             motion_vector_view,
+            surface_color_view,
             debug_visualization_buffer,
             &self.shade_command_count_buffer,
             &self.shade_command_buffer,
@@ -655,6 +719,7 @@ impl ComputeVoxelsPass {
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
+        leaf_voxel_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("coarse depth bind group"),
@@ -676,6 +741,10 @@ impl ComputeVoxelsPass {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(coarse_depth_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: leaf_voxel_buffer.as_entire_binding(),
+                },
             ],
         })
     }
@@ -685,12 +754,14 @@ impl ComputeVoxelsPass {
         bind_group_layout: &wgpu::BindGroupLayout,
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
+        surface_color_view: &wgpu::TextureView,
         motion_vector_view: &wgpu::TextureView,
         coarse_depth_view: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
         camera_buffer: &wgpu::Buffer,
         previous_camera_buffer: &wgpu::Buffer,
         voxel_mask_buffer: &wgpu::Buffer,
+        leaf_voxel_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("trace bind group"),
@@ -728,6 +799,14 @@ impl ComputeVoxelsPass {
                     binding: 8,
                     resource: wgpu::BindingResource::TextureView(motion_vector_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: leaf_voxel_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(surface_color_view),
+                },
             ],
         })
     }
@@ -739,6 +818,7 @@ impl ComputeVoxelsPass {
         world_position_view: &wgpu::TextureView,
         shading_input_view: &wgpu::TextureView,
         motion_vector_view: &wgpu::TextureView,
+        surface_color_view: &wgpu::TextureView,
         debug_visualization_buffer: &wgpu::Buffer,
         shade_command_count_buffer: &wgpu::Buffer,
         shade_command_buffer: &wgpu::Buffer,
@@ -775,6 +855,10 @@ impl ComputeVoxelsPass {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(motion_vector_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(surface_color_view),
+                },
             ],
         })
     }
@@ -806,6 +890,7 @@ impl ComputeVoxelsPass {
         bind_group_layout: &wgpu::BindGroupLayout,
         tlas: &wgpu::Tlas,
         voxel_mask_buffer: &wgpu::Buffer,
+        leaf_voxel_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("visualize scene bind group"),
@@ -818,6 +903,10 @@ impl ComputeVoxelsPass {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: voxel_mask_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: leaf_voxel_buffer.as_entire_binding(),
                 },
             ],
         })

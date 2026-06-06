@@ -1,5 +1,6 @@
-#[cfg(test)]
 pub(crate) const VOXEL_GRID_DIM: u32 = 64;
+pub(crate) const LEAF_VOXEL_WORD_COUNT: usize =
+    (VOXEL_GRID_DIM as usize) * (VOXEL_GRID_DIM as usize) * (VOXEL_GRID_DIM as usize);
 #[cfg(test)]
 pub(crate) const REGION_AXIS: u32 = 8;
 #[cfg(test)]

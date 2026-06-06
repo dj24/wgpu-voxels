@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::scene::OCCUPANCY_WORD_COUNT;
+use crate::scene::{LEAF_VOXEL_WORD_COUNT, OCCUPANCY_WORD_COUNT};
 
 const CLEAR_WORKGROUP_SIZE: u32 = 256;
 const POPULATE_WORKGROUP_SIZE_XY: u32 = 8;
@@ -29,8 +29,10 @@ struct ChunkGenerationObject {
 pub(crate) struct GenerateVoxelsPass {
     bind_group: wgpu::BindGroup,
     clear_pipeline: wgpu::ComputePipeline,
+    clear_leaf_pipeline: wgpu::ComputePipeline,
     populate_pipeline: wgpu::ComputePipeline,
     total_mask_words: u32,
+    total_leaf_words: u32,
     active_object_count: u32,
     _params_buffer: wgpu::Buffer,
     _object_buffer: wgpu::Buffer,
@@ -40,6 +42,7 @@ impl GenerateVoxelsPass {
     pub(crate) fn new(
         device: &wgpu::Device,
         voxel_mask_buffer: &wgpu::Buffer,
+        leaf_voxel_buffer: &wgpu::Buffer,
         objects: &[crate::scene::RenderObject],
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -83,6 +86,16 @@ impl GenerateVoxelsPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -100,6 +113,15 @@ impl GenerateVoxelsPass {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
+        let clear_leaf_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("clear leaf voxels pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("clear_leaf_voxels_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let populate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("populate chunk voxel masks pipeline"),
             layout: Some(&pipeline_layout),
@@ -157,14 +179,20 @@ impl GenerateVoxelsPass {
                     binding: 2,
                     resource: params_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: leaf_voxel_buffer.as_entire_binding(),
+                },
             ],
         });
 
         Self {
             bind_group,
             clear_pipeline,
+            clear_leaf_pipeline,
             populate_pipeline,
             total_mask_words: max_object_count(objects) * OCCUPANCY_WORD_COUNT as u32,
+            total_leaf_words: max_object_count(objects) * LEAF_VOXEL_WORD_COUNT as u32,
             active_object_count: objects.len() as u32,
             _params_buffer: params_buffer,
             _object_buffer: object_buffer,
@@ -184,6 +212,18 @@ impl GenerateVoxelsPass {
                 1,
                 1,
             );
+        }
+        {
+            let mut clear_leaf_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("clear leaf voxels pass"),
+                timestamp_writes: None,
+            });
+            clear_leaf_pass.set_pipeline(&self.clear_leaf_pipeline);
+            clear_leaf_pass.set_bind_group(0, &self.bind_group, &[]);
+            let total_leaf_workgroups = self.total_leaf_words.div_ceil(CLEAR_WORKGROUP_SIZE);
+            let clear_leaf_dispatch_x = total_leaf_workgroups.min(u16::MAX as u32);
+            let clear_leaf_dispatch_y = total_leaf_workgroups.div_ceil(clear_leaf_dispatch_x);
+            clear_leaf_pass.dispatch_workgroups(clear_leaf_dispatch_x, clear_leaf_dispatch_y, 1);
         }
 
         let total_object_slices = self.active_object_count * 64;

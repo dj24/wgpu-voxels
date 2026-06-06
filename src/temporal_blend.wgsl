@@ -34,7 +34,6 @@ var motion_sampler: sampler;
 var history_sampler: sampler;
 
 const TEMPORAL_HISTORY_WEIGHT: f32 = 0.95;
-const TEMPORAL_CURRENT_WEIGHT: f32 = 0.05;
 const DEPTH_REJECTION_BIAS: f32 = 0.02;
 const DEPTH_REJECTION_SCALE: f32 = 0.01;
 
@@ -113,5 +112,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let history = textureSample(history_texture, history_sampler, history_uv);
-    return history * TEMPORAL_HISTORY_WEIGHT + current * TEMPORAL_CURRENT_WEIGHT;
+    return history * TEMPORAL_HISTORY_WEIGHT + current * (1.0 - TEMPORAL_HISTORY_WEIGHT);
 }

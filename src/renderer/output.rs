@@ -6,6 +6,8 @@ pub(crate) const WORLD_POSITION_TEXTURE_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba32Float;
 pub(crate) const SHADING_INPUT_TEXTURE_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba32Float;
+pub(crate) const SURFACE_COLOR_TEXTURE_FORMAT: wgpu::TextureFormat =
+    wgpu::TextureFormat::Rgba8Unorm;
 pub(crate) const MOTION_VECTOR_TEXTURE_FORMAT: wgpu::TextureFormat =
     wgpu::TextureFormat::Rgba16Float;
 pub(crate) const COARSE_DEPTH_DIVISOR: u32 = 2;
@@ -21,6 +23,8 @@ pub(crate) struct OutputTarget {
     history_world_position_views: [wgpu::TextureView; 2],
     _shading_input_texture: wgpu::Texture,
     shading_input_view: wgpu::TextureView,
+    _surface_color_texture: wgpu::Texture,
+    surface_color_view: wgpu::TextureView,
     _motion_vector_texture: wgpu::Texture,
     motion_vector_view: wgpu::TextureView,
     _coarse_depth_texture: wgpu::Texture,
@@ -133,6 +137,22 @@ impl OutputTarget {
         });
         let shading_input_view =
             shading_input_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_color_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("surface color texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SURFACE_COLOR_TEXTURE_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let surface_color_view =
+            surface_color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let motion_vector_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("motion vector texture"),
             size: wgpu::Extent3d {
@@ -178,6 +198,8 @@ impl OutputTarget {
             history_world_position_views,
             _shading_input_texture: shading_input_texture,
             shading_input_view,
+            _surface_color_texture: surface_color_texture,
+            surface_color_view,
             _motion_vector_texture: motion_vector_texture,
             motion_vector_view,
             _coarse_depth_texture: coarse_depth_texture,
@@ -249,6 +271,10 @@ impl OutputTarget {
 
     pub(crate) fn motion_vector_view(&self) -> &wgpu::TextureView {
         &self.motion_vector_view
+    }
+
+    pub(crate) fn surface_color_view(&self) -> &wgpu::TextureView {
+        &self.surface_color_view
     }
 
     pub(crate) fn coarse_depth_size(&self) -> (u32, u32) {

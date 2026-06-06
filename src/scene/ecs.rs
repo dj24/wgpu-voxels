@@ -40,6 +40,7 @@ pub(crate) struct ActiveSceneSnapshot {
 
 const GRID_DIMENSION: usize = 26;
 const GRID_LAYERS: usize = 3;
+const MAX_ACTIVE_CHUNKS: usize = 128;
 
 pub(crate) fn build_scene_world() -> SceneWorld {
     let mut world = World::new();
@@ -78,10 +79,6 @@ pub(crate) fn build_scene_world() -> SceneWorld {
     world
 }
 
-pub(crate) fn collect_all_render_objects(world: &SceneWorld) -> Vec<RenderObject> {
-    collect_render_objects(world, true)
-}
-
 pub(crate) fn collect_active_render_objects(world: &SceneWorld) -> Vec<RenderObject> {
     collect_render_objects(world, false)
 }
@@ -91,7 +88,7 @@ pub(crate) fn advance_chunk_loading(world: &mut SceneWorld) -> ActiveSceneSnapsh
     let total_count = entities.len();
     let next_entity = {
         let mut progress = world.resource_mut::<LoadProgress>();
-        if progress.next_index >= total_count {
+        if progress.next_index >= total_count || progress.next_index >= MAX_ACTIVE_CHUNKS {
             return snapshot(world);
         }
 
@@ -103,6 +100,17 @@ pub(crate) fn advance_chunk_loading(world: &mut SceneWorld) -> ActiveSceneSnapsh
     world.entity_mut(next_entity).insert(Loaded);
     ActiveSceneSnapshot {
         active_count: world.resource::<LoadProgress>().next_index,
+    }
+}
+
+pub(crate) fn load_max_active_chunks(world: &mut SceneWorld) -> ActiveSceneSnapshot {
+    let mut previous = snapshot(world);
+    loop {
+        let current = advance_chunk_loading(world);
+        if current == previous {
+            return current;
+        }
+        previous = current;
     }
 }
 

@@ -19,7 +19,7 @@ struct DebugVisualizationParams {
 struct RayMarch {
     hit: bool,
     t: f32,
-    normal: vec3<f32>,
+    packed_voxel: u32,
     cell: vec3<i32>,
     step_count: u32,
 }
@@ -67,6 +67,12 @@ var shading_input_output: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(8)
 var motion_vector_output: texture_storage_2d<rgba16float, write>;
 
+@group(0) @binding(9)
+var<storage, read> leaf_voxels: array<u32>;
+
+@group(0) @binding(10)
+var surface_color_output: texture_storage_2d<rgba8unorm, write>;
+
 @group(1) @binding(0)
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
@@ -91,7 +97,11 @@ var motion_vector_texture: texture_2d<f32>;
 @group(1) @binding(7)
 var<storage, read_write> shade_dispatch_args: DispatchIndirectArgsStorage;
 
+@group(1) @binding(8)
+var surface_color_texture: texture_2d<f32>;
+
 const VOXEL_GRID_DIM: i32 = 64;
+const LEAF_VOXEL_WORD_COUNT_U32: u32 = 262144u;
 const REGION_AXIS: i32 = 8;
 const REGION_AXIS_U32: u32 = 8u;
 const COARSE_REGION_AXIS: i32 = 4;
@@ -110,7 +120,6 @@ const COARSE_DEPTH_BIAS_SCALE: f32 = 0.0;
 const PRIMARY_RAY_T_MAX: f32 = 100.0;
 const SHADOW_RAY_T_MIN: f32 = 0.001;
 const SHADOW_RAY_T_MAX: f32 = 100.0;
-const NORMAL_SAMPLE_RADIUS: i32 = 1;
 const SHADE_COMMAND_WORKGROUP_SIZE: u32 = 64u;
 const DEBUG_VIEW_DEFAULT: u32 = 0u;
 const DEBUG_VIEW_HEATMAP: u32 = 1u;
@@ -187,6 +196,10 @@ fn flatten_leaf_index(local_position: vec3<u32>) -> u32 {
         + REGION_AXIS_U32 * (local_position.y + REGION_AXIS_U32 * local_position.z);
 }
 
+fn flatten_dense_voxel_index(voxel: vec3<u32>) -> u32 {
+    return voxel.x + u32(VOXEL_GRID_DIM) * (voxel.y + u32(VOXEL_GRID_DIM) * voxel.z);
+}
+
 fn flatten_coarse_index(region_position: vec3<u32>) -> u32 {
     return region_position.x
         + COARSE_REGION_AXIS_U32
@@ -207,6 +220,10 @@ fn coarse_region_grid_dimensions() -> vec3<i32> {
 
 fn object_mask_word(object_mask_offset: u32, word_index: u32) -> u32 {
     return voxel_occupancy[object_mask_offset + word_index];
+}
+
+fn object_leaf_word(object_index: u32, voxel_index: u32) -> u32 {
+    return leaf_voxels[object_index * LEAF_VOXEL_WORD_COUNT_U32 + voxel_index];
 }
 
 fn coarse_region_mask_at_region_coord(
@@ -265,32 +282,41 @@ fn voxel_filled(object_mask_offset: u32, cell: vec3<i32>) -> bool {
     return (leaf_word & occupancy_bit_mask(leaf_index)) != 0u;
 }
 
-fn voxel_occupancy_value(object_mask_offset: u32, cell: vec3<i32>) -> f32 {
-    if (voxel_filled(object_mask_offset, cell)) {
-        return 1.0;
-    }
-    return 0.0;
+fn leaf_voxel_word(object_index: u32, cell: vec3<i32>) -> u32 {
+    return object_leaf_word(object_index, flatten_dense_voxel_index(vec3<u32>(cell)));
 }
 
-fn fallback_normal(direction: vec3<f32>, last_axis: i32, step_dir: vec3<i32>) -> vec3<f32> {
-    if (last_axis == 0) {
-        return vec3<f32>(-f32(step_dir.x), 0.0, 0.0);
+fn normalize_or(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let length_squared = dot(v, v);
+    if (length_squared > 1e-8) {
+        return v * inverseSqrt(length_squared);
     }
-    if (last_axis == 1) {
-        return vec3<f32>(0.0, -f32(step_dir.y), 0.0);
-    }
-    if (last_axis == 2) {
-        return vec3<f32>(0.0, 0.0, -f32(step_dir.z));
-    }
+    return fallback;
+}
 
-    let axis = abs(direction);
-    if (axis.x >= axis.y && axis.x >= axis.z) {
-        return vec3<f32>(select(1.0, -1.0, direction.x >= 0.0), 0.0, 0.0);
-    }
-    if (axis.y >= axis.z) {
-        return vec3<f32>(0.0, select(1.0, -1.0, direction.y >= 0.0), 0.0);
-    }
-    return vec3<f32>(0.0, 0.0, select(1.0, -1.0, direction.z >= 0.0));
+fn unpack_normal_component(bits: u32) -> f32 {
+    return (f32(bits & 0xfu) / 15.0) * 2.0 - 1.0;
+}
+
+fn unpack_leaf_normal(packed_voxel: u32) -> vec3<f32> {
+    let normal = vec3<f32>(
+        unpack_normal_component(packed_voxel >> 2u),
+        unpack_normal_component(packed_voxel >> 6u),
+        unpack_normal_component(packed_voxel >> 10u),
+    );
+    return normalize_or(normal, vec3<f32>(0.0, 1.0, 0.0));
+}
+
+fn unpack_leaf_color(packed_voxel: u32) -> vec3<f32> {
+    return vec3<f32>(
+        f32((packed_voxel >> 14u) & 0x3fu) / 63.0,
+        f32((packed_voxel >> 20u) & 0x3fu) / 63.0,
+        f32((packed_voxel >> 26u) & 0x3fu) / 63.0,
+    );
+}
+
+fn unpack_material_type(packed_voxel: u32) -> u32 {
+    return packed_voxel & 0x3u;
 }
 
 fn ray_box(
@@ -366,7 +392,7 @@ fn intersect_voxel_object(
     );
 
     if (!box_hit.hit) {
-        return RayMarch(false, ray_t_max, vec3<f32>(0.0), vec3<i32>(-1), 0u);
+        return RayMarch(false, ray_t_max, 0u, vec3<i32>(-1), 0u);
     }
 
     var t_enter = box_hit.t_enter;
@@ -389,7 +415,6 @@ fn intersect_voxel_object(
     let size = voxel_size();
     var t_max = rebuild_dda_state(local_origin, local_direction, OBJECT_BOUNDS_MIN, size, cell);
     let t_delta = abs(vec3<f32>(size) / max(abs(local_direction), vec3<f32>(1e-5)));
-    var last_axis = -1;
     var step_count = 0u;
     let advance_epsilon = size * 0.5;
 
@@ -419,13 +444,10 @@ fn intersect_voxel_object(
 
             if (t_coarse_exit.x < t_coarse_exit.y && t_coarse_exit.x < t_coarse_exit.z) {
                 t_enter = t_coarse_exit.x;
-                last_axis = 0;
             } else if (t_coarse_exit.y < t_coarse_exit.z) {
                 t_enter = t_coarse_exit.y;
-                last_axis = 1;
             } else {
                 t_enter = t_coarse_exit.z;
-                last_axis = 2;
             }
 
             if (t_enter > t_exit || t_enter > ray_t_max) {
@@ -445,9 +467,9 @@ fn intersect_voxel_object(
             );
             cell = min(vec3<i32>(advanced_relative * vec3<f32>(grid_dims)), grid_dims - vec3<i32>(1));
             if (all(coarse_region == vec3<i32>(cell.x >> 4, cell.y >> 4, cell.z >> 4))) {
-                if (last_axis == 0) {
+                if (t_coarse_exit.x < t_coarse_exit.y && t_coarse_exit.x < t_coarse_exit.z) {
                     cell.x = cell.x + step_dir.x * steps_to_coarse_exit.x;
-                } else if (last_axis == 1) {
+                } else if (t_coarse_exit.y < t_coarse_exit.z) {
                     cell.y = cell.y + step_dir.y * steps_to_coarse_exit.y;
                 } else {
                     cell.z = cell.z + step_dir.z * steps_to_coarse_exit.z;
@@ -473,13 +495,10 @@ fn intersect_voxel_object(
 
             if (t_region_exit.x < t_region_exit.y && t_region_exit.x < t_region_exit.z) {
                 t_enter = t_region_exit.x;
-                last_axis = 0;
             } else if (t_region_exit.y < t_region_exit.z) {
                 t_enter = t_region_exit.y;
-                last_axis = 1;
             } else {
                 t_enter = t_region_exit.z;
-                last_axis = 2;
             }
 
             if (t_enter > t_exit || t_enter > ray_t_max) {
@@ -499,9 +518,9 @@ fn intersect_voxel_object(
             );
             cell = min(vec3<i32>(advanced_relative * vec3<f32>(grid_dims)), grid_dims - vec3<i32>(1));
             if (all(region == vec3<i32>(cell.x >> 3, cell.y >> 3, cell.z >> 3))) {
-                if (last_axis == 0) {
+                if (t_region_exit.x < t_region_exit.y && t_region_exit.x < t_region_exit.z) {
                     cell.x = cell.x + step_dir.x * steps_to_region_exit.x;
-                } else if (last_axis == 1) {
+                } else if (t_region_exit.y < t_region_exit.z) {
                     cell.y = cell.y + step_dir.y * steps_to_region_exit.y;
                 } else {
                     cell.z = cell.z + step_dir.z * steps_to_region_exit.z;
@@ -512,17 +531,8 @@ fn intersect_voxel_object(
         }
 
         if (voxel_filled(object_mask_offset, cell)) {
-            let gradient = vec3<f32>(
-                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(-NORMAL_SAMPLE_RADIUS, 0, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(NORMAL_SAMPLE_RADIUS, 0, 0)),
-                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, -NORMAL_SAMPLE_RADIUS, 0)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, NORMAL_SAMPLE_RADIUS, 0)),
-                voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, -NORMAL_SAMPLE_RADIUS)) - voxel_occupancy_value(object_mask_offset, cell + vec3<i32>(0, 0, NORMAL_SAMPLE_RADIUS)),
-            );
-            let local_normal = select(
-                fallback_normal(local_direction, last_axis, step_dir),
-                normalize(gradient),
-                length(gradient) > 1e-5,
-            );
-            return RayMarch(true, max(t_enter, ray_t_min), local_normal, cell, step_count);
+            let packed_voxel = leaf_voxel_word(instance_custom_data, cell);
+            return RayMarch(true, max(t_enter, ray_t_min), packed_voxel, cell, step_count);
         }
 
         if (t_max.x < t_max.y && t_max.x < t_max.z) {
@@ -544,7 +554,7 @@ fn intersect_voxel_object(
         }
     }
 
-    return RayMarch(false, t_exit, vec3<f32>(0.0), vec3<i32>(-1), step_count);
+    return RayMarch(false, t_exit, 0u, vec3<i32>(-1), step_count);
 }
 
 fn compute_camera_ray_direction(uv: vec2<f32>) -> vec3<f32> {
@@ -648,25 +658,41 @@ fn hash01(coord: vec2<u32>) -> f32 {
 }
 
 fn hash31(coord: vec3<f32>) -> f32 {
-    let value = sin(dot(coord, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453;
-    return fract(value);
+    var seed = fract(coord * 0.1031);
+    seed = seed + dot(seed, seed.yzx + 33.33);
+    return fract((seed.x + seed.y) * seed.z);
 }
 
-fn cosine_weighted_hemisphere_sample(world_normal: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
+fn temporal_sample_seed(time: f32) -> vec3<f32> {
+    let frame_like_time = floor(time * 60.0);
+    return vec3<f32>(
+        time * 0.7548777 + frame_like_time * 0.5698403,
+        time * 1.3247179 + frame_like_time * 0.4385792,
+        time * 2.6180340 + frame_like_time * 0.2817182,
+    );
+}
+
+fn uniform_hemisphere_sample(world_normal: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
     let normal = normalize(world_normal);
     let time = debug_visualization.sun_time_seconds.x;
+    let temporal_seed = temporal_sample_seed(time);
     let u1 = hash31(
         world_position * 71.43
             + normal * 13.17
-            + vec3<f32>(time * 0.73, time * 1.37, time * 2.11),
+            + temporal_seed * vec3<f32>(0.73, 1.37, 2.11),
     );
-    let u2 = hash31(world_position.zxy * 89.91 + normal.yzx * 7.31 + vec3<f32>(19.19, 73.73, 11.11));
+    let u2 = hash31(
+        world_position.zxy * 89.91
+            + normal.yzx * 7.31
+            + temporal_seed.zxy * vec3<f32>(19.19, 73.73, 11.11),
+    );
     let phi = 6.28318530718 * u1;
-    let radius = sqrt(u2);
+    let z = u2;
+    let radius = sqrt(max(0.0, 1.0 - z * z));
     let tangent_space = vec3<f32>(
         cos(phi) * radius,
         sin(phi) * radius,
-        sqrt(max(0.0, 1.0 - u2)),
+        z,
     );
 
     var reference_axis = vec3<f32>(0.0, 1.0, 0.0);
@@ -697,16 +723,15 @@ fn per_pixel_debug_color(world_position: vec3<f32>, gid: vec2<u32>) -> vec3<f32>
     return clamp(base_color + (noise - 0.5) * 0.12, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-fn shade_from_input(shading_input: vec4<f32>) -> vec3<f32> {
-    let object_index = u32(max(shading_input.w, 0.0));
-    return shade_ndotl(palette(object_index), shading_input.xyz);
+fn shade_from_input(base_color: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32> {
+    return shade_ndotl(base_color, shading_input.xyz);
 }
 
 fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
     let normal = normalize(world_normal);
-    let ray_direction = cosine_weighted_hemisphere_sample(normal, world_position);
+    let ray_direction = uniform_hemisphere_sample(normal, world_position);
     let ray_origin =
-        world_position + normal * voxel_size() + ray_direction * SHADOW_RAY_T_MIN;
+        world_position + normal * voxel_size() + ray_direction * voxel_size();
 
     var query: ray_query;
     let ray = RayDesc(0u, 0xffu, SHADOW_RAY_T_MIN, SHADOW_RAY_T_MAX, ray_origin, ray_direction);
@@ -739,10 +764,13 @@ fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
     return 1.0;
 }
 
-fn shaded_color(world_position: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32> {
+fn shaded_color(
+    world_position: vec3<f32>,
+    shading_input: vec4<f32>,
+    surface_color: vec3<f32>,
+) -> vec3<f32> {
     let visibility = sun_visibility(world_position, shading_input.xyz);
-    return vec3(visibility);
-    return shade_from_input(shading_input) * mix(visibility, 1.0, 0.15);
+    return shade_from_input(surface_color, shading_input) * mix(visibility, 1.0, 0.15);
 }
 
 fn encoded_step_count(world_position: vec4<f32>) -> u32 {
@@ -989,6 +1017,7 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var stored_world_position = vec4<f32>(0.0);
     var stored_shading_input = vec4<f32>(0.0);
+    var stored_surface_color = vec4<f32>(0.0);
     var stored_motion_vector = vec4<f32>(0.0);
     var accumulated_step_count = 0u;
     var closest_debug_t = ray.tmax;
@@ -1004,9 +1033,11 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let committed = rayQueryGetCommittedIntersection(&query);
         let ray_t_max = select(ray.tmax, committed.t, committed.kind != 0u);
         let local_origin = (candidate.world_to_object * vec4<f32>(ray_origin, 1.0)).xyz;
+        let local_direction =
+            normalize((candidate.world_to_object * vec4<f32>(ray_direction, 0.0)).xyz);
         let marched = intersect_voxel_object(
             local_origin,
-            ray_direction,
+            local_direction,
             ray.tmin,
             ray_t_max,
             candidate.instance_custom_data,
@@ -1026,10 +1057,15 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let local_voxel_center = (vec3<f32>(marched.cell) + vec3<f32>(0.5)) / f32(VOXEL_GRID_DIM);
         let hit_world_position = ray_origin + ray_direction * hit_t;
         let world_position = (candidate.object_to_world * vec4<f32>(local_voxel_center, 1.0)).xyz;
-        let world_normal = normalize((candidate.object_to_world * vec4<f32>(marched.normal, 0.0)).xyz);
+        let local_normal = unpack_leaf_normal(marched.packed_voxel);
+        let world_normal =
+            normalize((candidate.object_to_world * vec4<f32>(local_normal, 0.0)).xyz);
+        let surface_color = unpack_leaf_color(marched.packed_voxel);
+        let material_type = unpack_material_type(marched.packed_voxel);
         let previous_uv = project_world_to_uv(previous_camera, hit_world_position);
         stored_world_position = vec4<f32>(world_position, f32(accumulated_step_count) + 1.0);
-        stored_shading_input = vec4<f32>(world_normal, f32(candidate.instance_custom_data));
+        stored_shading_input = vec4<f32>(world_normal, f32(material_type));
+        stored_surface_color = vec4<f32>(surface_color, 1.0);
         if (previous_uv.z > 0.5) {
             stored_motion_vector = vec4<f32>(uv - previous_uv.xy, 1.0, 0.0);
         } else {
@@ -1041,11 +1077,13 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     if (!is_visible_surface(stored_world_position) && closest_debug_step_count > 0u) {
         stored_world_position = vec4<f32>(0.0, 0.0, 0.0, -(f32(closest_debug_step_count) + 1.0));
-        stored_shading_input = vec4<f32>(0.0, 0.0, 0.0, f32(closest_debug_object_index));
+        stored_shading_input = vec4<f32>(0.0);
+        stored_surface_color = vec4<f32>(palette(closest_debug_object_index), 1.0);
     }
 
     textureStore(world_position_output, vec2<i32>(id.xy), stored_world_position);
     textureStore(shading_input_output, vec2<i32>(id.xy), stored_shading_input);
+    textureStore(surface_color_output, vec2<i32>(id.xy), stored_surface_color);
     textureStore(motion_vector_output, vec2<i32>(id.xy), stored_motion_vector);
 }
 
@@ -1121,8 +1159,9 @@ fn consume_shade_command(command_index: u32) {
     let coverage = coverage_size_from_mode(command.y);
     let world_position = textureLoad(world_position_texture, vec2<i32>(origin), 0);
     let shading_input = textureLoad(shading_input_texture, vec2<i32>(origin), 0);
+    let surface_color = textureLoad(surface_color_texture, vec2<i32>(origin), 0);
     let color = select(
-        shaded_color(world_position.xyz, shading_input),
+        shaded_color(world_position.xyz, shading_input, surface_color.xyz),
         coverage_debug_color(origin, coverage, world_position),
         !is_visible_surface(world_position),
     );
@@ -1170,6 +1209,7 @@ fn debug_visualization_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = vec2<i32>(id.xy);
     let world_position = textureLoad(world_position_texture, pixel, 0);
     let shading_input = textureLoad(shading_input_texture, pixel, 0);
+    let surface_color = textureLoad(surface_color_texture, pixel, 0);
     let motion_vector = textureLoad(motion_vector_texture, pixel, 0);
     let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
     let background = debug_background(uv);
@@ -1178,7 +1218,7 @@ fn debug_visualization_main(@builtin(global_invocation_id) id: vec3<u32>) {
     var color = background;
 
     if (mode == DEBUG_VIEW_HEATMAP) {
-        let base_color = palette(u32(max(shading_input.w, 0.0)));
+        let base_color = surface_color.xyz;
         let heatmap_color = shade_ray_complexity(base_color, encoded_step_count(world_position));
         color = select(background, heatmap_color, has_heatmap_debug(world_position));
     } else if (mode == DEBUG_VIEW_WORLD_POSITION) {

@@ -4,9 +4,10 @@ A small Rust/WGPU voxel renderer. It opens a `winit` window, builds a procedural
 scene acceleration structure, renders into an offscreen texture with a compute
 shader, then blits the result to the swapchain with an FPS overlay.
 
-Voxel occupancy is generated once on startup on the CPU. Each chunk gets its
-own mask from a world-space sine-based density field, so neighboring chunks are
-distinct while still reading as one continuous world.
+Voxel occupancy and dense per-voxel shading payloads are generated once on
+startup on the GPU. Each chunk gets mask data plus packed leaf voxel words from
+a world-space density field, so neighboring chunks are distinct while still
+reading as one continuous world.
 
 ## Running
 
@@ -47,8 +48,8 @@ so it needs a compatible GPU/driver.
 ## Render Flow
 
 1. `main.rs` creates the window and initializes `Renderer`.
-2. `Renderer` builds GPU context, camera resources, scene acceleration data, and
-   a static per-chunk voxel mask buffer.
+2. `Renderer` builds GPU context, camera resources, scene acceleration data, a
+   static per-chunk voxel mask buffer, and a dense packed leaf voxel buffer.
 3. Each frame updates the camera from input, dispatches `compute.wgsl` into the
    offscreen output texture, blits that texture to the window, draws the FPS
    overlay, and presents the frame.

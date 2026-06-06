@@ -19,7 +19,7 @@ mod scene;
 use renderer::{DebugView, Renderer};
 use scene::{
     ActiveSceneSnapshot, SceneWorld, advance_chunk_loading, build_scene_world,
-    collect_active_render_objects, collect_all_render_objects,
+    collect_active_render_objects, load_max_active_chunks,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,8 +41,9 @@ fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
 fn run_headless(output_path: &Path, delay: Duration) -> Result<(), Box<dyn std::error::Error>> {
     const DEFAULT_CAPTURE_SIZE: PhysicalSize<u32> = PhysicalSize::new(1280, 720);
 
-    let world = build_scene_world();
-    let objects = collect_all_render_objects(&world);
+    let mut world = build_scene_world();
+    load_max_active_chunks(&mut world);
+    let objects = collect_active_render_objects(&world);
     let mut renderer = pollster::block_on(Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &objects))?;
     std::thread::sleep(delay);
     renderer.update_camera(&InputState::default(), delay.as_secs_f32());

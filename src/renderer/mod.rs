@@ -14,8 +14,8 @@ use winit::{
 use crate::{
     InputState,
     scene::{
-        Camera, CameraUniform, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN, OCCUPANCY_WORD_COUNT,
-        ProceduralAccelerationScene, RenderObject,
+        Camera, CameraUniform, LEAF_VOXEL_WORD_COUNT, OBJECT_BOUNDS_MAX, OBJECT_BOUNDS_MIN,
+        OCCUPANCY_WORD_COUNT, ProceduralAccelerationScene, RenderObject,
     },
 };
 
@@ -65,6 +65,7 @@ pub(crate) struct Renderer {
     debug_visualization_params: DebugVisualizationParams,
     debug_visualization_buffer: wgpu::Buffer,
     voxel_mask_buffer: wgpu::Buffer,
+    leaf_voxel_buffer: wgpu::Buffer,
     procedural_scene: ProceduralAccelerationScene,
     output_target: OutputTarget,
     generate_voxels_pass: GenerateVoxelsPass,
@@ -117,8 +118,13 @@ impl Renderer {
         let debug_visualization_buffer =
             Self::create_debug_visualization_buffer(&context.device, debug_visualization_params);
         let voxel_mask_buffer = Self::create_voxel_mask_buffer(&context.device, objects);
-        let generate_voxels_pass =
-            GenerateVoxelsPass::new(&context.device, &voxel_mask_buffer, objects);
+        let leaf_voxel_buffer = Self::create_leaf_voxel_buffer(&context.device, objects);
+        let generate_voxels_pass = GenerateVoxelsPass::new(
+            &context.device,
+            &voxel_mask_buffer,
+            &leaf_voxel_buffer,
+            objects,
+        );
         Self::dispatch_voxel_generation(&context.device, &context.queue, &generate_voxels_pass);
 
         let procedural_scene = ProceduralAccelerationScene::build(
@@ -137,6 +143,7 @@ impl Renderer {
             output_target.view(),
             output_target.world_position_view(),
             output_target.shading_input_view(),
+            output_target.surface_color_view(),
             output_target.motion_vector_view(),
             output_target.coarse_depth_view(),
             procedural_scene.tlas(),
@@ -144,6 +151,7 @@ impl Renderer {
             &previous_camera_buffer,
             &debug_visualization_buffer,
             &voxel_mask_buffer,
+            &leaf_voxel_buffer,
         );
         let temporal_blend_pass = TemporalBlendPass::new(
             &context.device,
@@ -178,6 +186,7 @@ impl Renderer {
             debug_visualization_params,
             debug_visualization_buffer,
             voxel_mask_buffer,
+            leaf_voxel_buffer,
             procedural_scene,
             output_target,
             generate_voxels_pass,
@@ -236,8 +245,13 @@ impl Renderer {
             self.debug_visualization_params,
         );
         self.voxel_mask_buffer = Self::create_voxel_mask_buffer(&self.context.device, objects);
-        self.generate_voxels_pass =
-            GenerateVoxelsPass::new(&self.context.device, &self.voxel_mask_buffer, objects);
+        self.leaf_voxel_buffer = Self::create_leaf_voxel_buffer(&self.context.device, objects);
+        self.generate_voxels_pass = GenerateVoxelsPass::new(
+            &self.context.device,
+            &self.voxel_mask_buffer,
+            &self.leaf_voxel_buffer,
+            objects,
+        );
         Self::dispatch_voxel_generation(
             &self.context.device,
             &self.context.queue,
@@ -257,6 +271,7 @@ impl Renderer {
             self.output_target.view(),
             self.output_target.world_position_view(),
             self.output_target.shading_input_view(),
+            self.output_target.surface_color_view(),
             self.output_target.motion_vector_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
@@ -264,6 +279,7 @@ impl Renderer {
             &self.previous_camera_buffer,
             &self.debug_visualization_buffer,
             &self.voxel_mask_buffer,
+            &self.leaf_voxel_buffer,
         );
         Ok(())
     }
@@ -408,6 +424,7 @@ impl Renderer {
             self.output_target.view(),
             self.output_target.world_position_view(),
             self.output_target.shading_input_view(),
+            self.output_target.surface_color_view(),
             self.output_target.motion_vector_view(),
             self.output_target.coarse_depth_view(),
             self.procedural_scene.tlas(),
@@ -415,6 +432,7 @@ impl Renderer {
             &self.previous_camera_buffer,
             &self.debug_visualization_buffer,
             &self.voxel_mask_buffer,
+            &self.leaf_voxel_buffer,
         );
         self.temporal_blend_pass.rebind(
             &self.context.device,
@@ -512,14 +530,20 @@ impl Renderer {
     }
 
     fn create_voxel_mask_buffer(device: &wgpu::Device, objects: &[RenderObject]) -> wgpu::Buffer {
-        let object_count = objects
-            .iter()
-            .map(|object| object.object_index as u64 + 1)
-            .max()
-            .unwrap_or(0);
+        let object_count = object_capacity(objects);
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("voxel occupancy bitmask"),
             size: object_count * (OCCUPANCY_WORD_COUNT * core::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn create_leaf_voxel_buffer(device: &wgpu::Device, objects: &[RenderObject]) -> wgpu::Buffer {
+        let object_count = object_capacity(objects);
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("leaf voxel storage"),
+            size: object_count * (LEAF_VOXEL_WORD_COUNT * core::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         })
@@ -536,6 +560,14 @@ impl Renderer {
         generate_voxels_pass.dispatch(&mut encoder);
         queue.submit(Some(encoder.finish()));
     }
+}
+
+fn object_capacity(objects: &[RenderObject]) -> u64 {
+    objects
+        .iter()
+        .map(|object| object.object_index as u64 + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 fn debug_visualization_params(
