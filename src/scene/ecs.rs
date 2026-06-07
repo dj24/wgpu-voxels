@@ -125,12 +125,16 @@ fn build_terrain_chunk_descriptors() -> Vec<ChunkDescriptor> {
 }
 
 fn build_cornell_chunk_descriptors() -> Vec<ChunkDescriptor> {
-    vec![ChunkDescriptor {
-        position: [0.0, 0.0, 0.0],
-        object_index: 0,
-        generation_kind: VoxelGenerationKind::Cornell,
-        initially_loaded: true,
-    }]
+    (-4..=4)
+        .flat_map(|y| {
+            (-4..=4).map(move |x| ChunkDescriptor {
+                position: [x as f32, y as f32, 0.0],
+                object_index: 0,
+                generation_kind: VoxelGenerationKind::Cornell,
+                initially_loaded: true,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn collect_active_render_objects(world: &SceneWorld) -> Vec<RenderObject> {

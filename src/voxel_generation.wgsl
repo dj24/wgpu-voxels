@@ -403,6 +403,28 @@ fn sdf_box_sample(
     return SceneSdfSample(sdf_box(point - center, half_extent), color);
 }
 
+fn rotate_y(point: vec3<f32>, angle: f32) -> vec3<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+
+    return vec3<f32>(
+        c * point.x - s * point.z,
+        point.y,
+        s * point.x + c * point.z,
+    );
+}
+
+fn sdf_rotated_y_box_sample(
+    point: vec3<f32>,
+    center: vec3<f32>,
+    half_extent: vec3<f32>,
+    angle: f32,
+    color: vec3<f32>,
+) -> SceneSdfSample {
+    let local_point = rotate_y(point - center, -angle);
+    return SceneSdfSample(sdf_box(local_point, half_extent), color);
+}
+
 fn union_sample(a: SceneSdfSample, b: SceneSdfSample) -> SceneSdfSample {
     if (b.distance < a.distance) {
         return b;
@@ -456,19 +478,21 @@ fn cornell_scene_sample(local_position: vec3<f32>) -> SceneSdfSample {
     );
     sample = union_sample(
         sample,
-        sdf_box_sample(
+        sdf_rotated_y_box_sample(
             local_position,
             vec3<f32>(0.33, 0.17, 0.34),
             vec3<f32>(0.12, 0.17, 0.12),
+            0.22,
             CORNELL_WHITE,
         ),
     );
     sample = union_sample(
         sample,
-        sdf_box_sample(
+        sdf_rotated_y_box_sample(
             local_position,
             vec3<f32>(0.68, 0.31, 0.62),
             vec3<f32>(0.13, 0.31, 0.13),
+            -0.28,
             CORNELL_WHITE,
         ),
     );
