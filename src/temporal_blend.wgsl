@@ -33,7 +33,7 @@ var motion_sampler: sampler;
 @group(0) @binding(8)
 var history_sampler: sampler;
 
-const TEMPORAL_HISTORY_WEIGHT: f32 = 0.8;
+const TEMPORAL_HISTORY_WEIGHT: f32 = 0.95;
 const DEPTH_REJECTION_BIAS: f32 = 0.02;
 const DEPTH_REJECTION_SCALE: f32 = 0.01;
 

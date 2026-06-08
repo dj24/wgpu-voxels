@@ -42,10 +42,13 @@ const CORNELL_WALL_THICKNESS: f32 = 0.055;
 const CORNELL_WHITE: vec3<f32> = vec3<f32>(0.82, 0.80, 0.76);
 const CORNELL_RED: vec3<f32> = vec3<f32>(0.74, 0.12, 0.10);
 const CORNELL_GREEN: vec3<f32> = vec3<f32>(0.16, 0.58, 0.16);
+const MATERIAL_DIFFUSE: u32 = 0u;
+const MATERIAL_EMISSIVE: u32 = 1u;
 
 struct SceneSdfSample {
     distance: f32,
     color: vec3<f32>,
+    material_type: u32,
 }
 
 fn voxel_size() -> f32 {
@@ -344,7 +347,16 @@ fn sdf_box_sample(
     half_extent: vec3<f32>,
     color: vec3<f32>,
 ) -> SceneSdfSample {
-    return SceneSdfSample(sdf_box(point - center, half_extent), color);
+    return SceneSdfSample(sdf_box(point - center, half_extent), color, MATERIAL_DIFFUSE);
+}
+
+fn sdf_emissive_box_sample(
+    point: vec3<f32>,
+    center: vec3<f32>,
+    half_extent: vec3<f32>,
+    color: vec3<f32>,
+) -> SceneSdfSample {
+    return SceneSdfSample(sdf_box(point - center, half_extent), color, MATERIAL_EMISSIVE);
 }
 
 fn rotate_y(point: vec3<f32>, angle: f32) -> vec3<f32> {
@@ -366,7 +378,7 @@ fn sdf_rotated_y_box_sample(
     color: vec3<f32>,
 ) -> SceneSdfSample {
     let local_point = rotate_y(point - center, -angle);
-    return SceneSdfSample(sdf_box(local_point, half_extent), color);
+    return SceneSdfSample(sdf_box(local_point, half_extent), color, MATERIAL_DIFFUSE);
 }
 
 fn union_sample(a: SceneSdfSample, b: SceneSdfSample) -> SceneSdfSample {
@@ -422,6 +434,15 @@ fn cornell_scene_sample(local_position: vec3<f32>) -> SceneSdfSample {
     );
     sample = union_sample(
         sample,
+        sdf_emissive_box_sample(
+            local_position,
+            vec3<f32>(0.5, 0.935, 0.5),
+            vec3<f32>(0.16, 0.01, 0.12),
+            vec3<f32>(1.0),
+        ),
+    );
+    sample = union_sample(
+        sample,
         sdf_rotated_y_box_sample(
             local_position,
             vec3<f32>(0.33, 0.17, 0.34),
@@ -463,7 +484,7 @@ fn cornell_scene_normal(local_position: vec3<f32>) -> vec3<f32> {
 fn cornell_voxel_payload(voxel: vec3<u32>) -> u32 {
     let local_position = (vec3<f32>(voxel) + vec3<f32>(0.5)) * voxel_size();
     let sample = cornell_scene_sample(local_position);
-    return pack_leaf_voxel(0u, cornell_scene_normal(local_position), sample.color);
+    return pack_leaf_voxel(sample.material_type, cornell_scene_normal(local_position), sample.color);
 }
 
 fn write_voxel_data(object_index: u32, voxel: vec3<u32>, payload: u32) {

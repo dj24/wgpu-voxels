@@ -29,6 +29,7 @@ struct BounceHit {
     world_position: vec3<f32>,
     world_normal: vec3<f32>,
     color: vec3<f32>,
+    material_type: u32,
 }
 
 struct BoxIntersection {
@@ -127,6 +128,8 @@ const COARSE_DEPTH_BIAS_SCALE: f32 = 0.0;
 const PRIMARY_RAY_T_MAX: f32 = 100.0;
 const BOUNCE_RAY_T_MIN: f32 = 0.001;
 const BOUNCE_RAY_T_MAX: f32 = 100.0;
+const MATERIAL_DIFFUSE: u32 = 0u;
+const MATERIAL_EMISSIVE: u32 = 1u;
 const SHADE_COMMAND_WORKGROUP_SIZE: u32 = 64u;
 const DEBUG_VIEW_DEFAULT: u32 = 0u;
 const DEBUG_VIEW_HEATMAP: u32 = 1u;
@@ -321,6 +324,14 @@ fn unpack_leaf_color(packed_voxel: u32) -> vec3<f32> {
         f32((packed_voxel >> 20u) & 0x3fu) / 63.0,
         f32((packed_voxel >> 26u) & 0x3fu) / 63.0,
     );
+}
+
+fn unpack_leaf_material_type(packed_voxel: u32) -> u32 {
+    return packed_voxel & 0x3u;
+}
+
+fn is_emissive_material(material_type: u32) -> bool {
+    return material_type == MATERIAL_EMISSIVE;
 }
 
 fn ray_box(
@@ -764,11 +775,18 @@ fn trace_diffuse_bounce(ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> Boun
                 hit_world_position,
                 world_normal,
                 unpack_leaf_color(marched.packed_voxel),
+                unpack_leaf_material_type(marched.packed_voxel),
             );
         }
     }
 
-    return BounceHit(false, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0));
+    return BounceHit(
+        false,
+        vec3<f32>(0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0),
+        MATERIAL_DIFFUSE,
+    );
 }
 
 fn diffuse_bounce_tint(
@@ -781,6 +799,9 @@ fn diffuse_bounce_tint(
         world_position + ray_direction * voxel_size();
     let first_hit = trace_diffuse_bounce(ray_origin, ray_direction);
     if (!first_hit.hit) {
+        return vec3<f32>(0.15);
+    }
+    if (is_emissive_material(first_hit.material_type)) {
         return vec3<f32>(1.0);
     }
 
@@ -789,20 +810,24 @@ fn diffuse_bounce_tint(
     let second_ray_origin =
         first_hit.world_position + second_ray_direction * voxel_size();
     let second_hit = trace_diffuse_bounce(second_ray_origin, second_ray_direction);
-    if (second_hit.hit) {
-        return vec3<f32>(0.15);
+    if (second_hit.hit && is_emissive_material(second_hit.material_type)) {
+        return mix(vec3<f32>(1.0), first_hit.color, 0.75);
     }
 
-    return mix(vec3<f32>(1.0), first_hit.color, 0.5);
+    return vec3<f32>(0.15);
 }
 
 fn shaded_color(
     world_position: vec3<f32>,
     shading_input: vec4<f32>,
-    surface_color: vec3<f32>,
+    surface_color: vec4<f32>,
 ) -> vec3<f32> {
+    if (surface_color.a > 0.5) {
+        return surface_color.xyz;
+    }
+
     let bounce_tint = diffuse_bounce_tint(world_position, shading_input.xyz);
-    return shade_from_input(surface_color, shading_input) * bounce_tint;
+    return surface_color.xyz * bounce_tint;
 }
 
 fn encoded_step_count(world_position: vec4<f32>) -> u32 {
@@ -1093,10 +1118,12 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let world_normal =
             normalize((candidate.object_to_world * vec4<f32>(local_normal, 0.0)).xyz);
         let surface_color = unpack_leaf_color(marched.packed_voxel);
+        let surface_material_type = unpack_leaf_material_type(marched.packed_voxel);
+        let surface_emissive = select(0.0, 1.0, is_emissive_material(surface_material_type));
         let previous_uv = project_world_to_uv(previous_camera, hit_world_position);
         stored_world_position = vec4<f32>(world_position, f32(accumulated_step_count) + 1.0);
         stored_shading_input = vec4<f32>(world_normal, hit_t);
-        stored_surface_color = vec4<f32>(surface_color, 1.0);
+        stored_surface_color = vec4<f32>(surface_color, surface_emissive);
         if (previous_uv.z > 0.5) {
             stored_motion_vector = vec4<f32>(uv - previous_uv.xy, 1.0, 0.0);
         } else {
@@ -1192,7 +1219,7 @@ fn consume_shade_command(command_index: u32) {
     let shading_input = textureLoad(shading_input_texture, vec2<i32>(origin), 0);
     let surface_color = textureLoad(surface_color_texture, vec2<i32>(origin), 0);
     let color = select(
-        shaded_color(world_position.xyz, shading_input, surface_color.xyz),
+        shaded_color(world_position.xyz, shading_input, surface_color),
         coverage_debug_color(origin, coverage, world_position),
         !is_visible_surface(world_position),
     );
