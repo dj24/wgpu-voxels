@@ -38,7 +38,6 @@ const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const MAX_HEIGHT: f32 = 3.0;
 // Larger radii communicate broader implied form at the cost of local detail.
 const DSS_NORMAL_KERNEL_RADIUS: i32 = 2;
-const NORMAL_DITHER_MIN_DOT: f32 = 0.8;
 const CORNELL_WALL_THICKNESS: f32 = 0.055;
 const CORNELL_WHITE: vec3<f32> = vec3<f32>(0.82, 0.80, 0.76);
 const CORNELL_RED: vec3<f32> = vec3<f32>(0.74, 0.12, 0.10);
@@ -285,74 +284,19 @@ fn quantize_unorm(value: f32, max_value: u32) -> u32 {
     return u32(round(clamp(value, 0.0, 1.0) * f32(max_value)));
 }
 
-fn bayer_2x2x2(cell: vec3<u32>) -> u32 {
-    let x = cell.x & 1u;
-    let y = cell.y & 1u;
-    let z = cell.z & 1u;
-
-    if (z == 0u) {
-        if (y == 0u) {
-            return select(0u, 4u, x == 1u);
-        }
-        return select(6u, 2u, x == 1u);
-    }
-
-    if (y == 0u) {
-        return select(7u, 3u, x == 1u);
-    }
-    return select(1u, 5u, x == 1u);
-}
-
-fn ordered_dither_2x2x2(cell: vec3<u32>) -> f32 {
-    return (f32(bayer_2x2x2(cell)) + 0.5) / 8.0 - 0.5;
-}
-
 fn quantize_normal_component(value: f32) -> u32 {
     return quantize_unorm(value * 0.5 + 0.5, 15u);
-}
-
-fn quantize_dithered_normal_component(value: f32, dither_cell: vec3<u32>) -> u32 {
-    let dithered_unorm =
-        value * 0.5 + 0.5 + ordered_dither_2x2x2(dither_cell) / 16.0;
-    return quantize_unorm(dithered_unorm, 15u);
-}
-
-fn unpack_normal_component(bits: u32) -> f32 {
-    return (f32(bits & 0xfu) / 15.0) * 2.0 - 1.0;
-}
-
-fn unpack_packed_normal(bits: vec3<u32>) -> vec3<f32> {
-    return normalize_or(
-        vec3<f32>(
-            unpack_normal_component(bits.x),
-            unpack_normal_component(bits.y),
-            unpack_normal_component(bits.z),
-        ),
-        vec3<f32>(0.0, 1.0, 0.0),
-    );
 }
 
 fn pack_leaf_voxel(
     material_type: u32,
     normal: vec3<f32>,
     color: vec3<f32>,
-    voxel: vec3<u32>,
 ) -> u32 {
-    let base_packed_normal = vec3<u32>(
+    let packed_normal = vec3<u32>(
         quantize_normal_component(normal.x),
         quantize_normal_component(normal.y),
         quantize_normal_component(normal.z),
-    );
-    let dithered_packed_normal = vec3<u32>(
-        quantize_dithered_normal_component(normal.x, voxel),
-        quantize_dithered_normal_component(normal.y, voxel + vec3<u32>(1u, 3u, 2u)),
-        quantize_dithered_normal_component(normal.z, voxel + vec3<u32>(2u, 1u, 3u)),
-    );
-    let packed_normal = select(
-        base_packed_normal,
-        dithered_packed_normal,
-        dot(unpack_packed_normal(base_packed_normal), unpack_packed_normal(dithered_packed_normal))
-            >= NORMAL_DITHER_MIN_DOT,
     );
     let packed_normal_x = packed_normal.x;
     let packed_normal_y = packed_normal.y;
@@ -373,7 +317,7 @@ fn pack_leaf_voxel(
 fn terrain_voxel_payload(chunk_origin: vec3<f32>, object_index: u32, voxel: vec3<u32>) -> u32 {
     let voxel_i32 = vec3<i32>(voxel);
     if (!terrain_voxel_has_exposed_side(chunk_origin, voxel_i32)) {
-        return pack_leaf_voxel(0u, vec3<f32>(0.0, 0.0, 0.0), palette(object_index), voxel);
+        return pack_leaf_voxel(0u, vec3<f32>(0.0, 0.0, 0.0), palette(object_index));
     }
     let dss_gradient = terrain_dss_gradient_normal(chunk_origin, voxel_i32);
     let dss_centroid = terrain_dss_centroid_normal(chunk_origin, voxel_i32);
@@ -386,7 +330,7 @@ fn terrain_voxel_payload(chunk_origin: vec3<f32>, object_index: u32, voxel: vec3
         ),
     );
     let color = palette(object_index);
-    return pack_leaf_voxel(0u, local_normal, color, voxel);
+    return pack_leaf_voxel(0u, local_normal, color);
 }
 
 fn sdf_box(point: vec3<f32>, half_extent: vec3<f32>) -> f32 {
@@ -519,7 +463,7 @@ fn cornell_scene_normal(local_position: vec3<f32>) -> vec3<f32> {
 fn cornell_voxel_payload(voxel: vec3<u32>) -> u32 {
     let local_position = (vec3<f32>(voxel) + vec3<f32>(0.5)) * voxel_size();
     let sample = cornell_scene_sample(local_position);
-    return pack_leaf_voxel(0u, cornell_scene_normal(local_position), sample.color, voxel);
+    return pack_leaf_voxel(0u, cornell_scene_normal(local_position), sample.color);
 }
 
 fn write_voxel_data(object_index: u32, voxel: vec3<u32>, payload: u32) {
