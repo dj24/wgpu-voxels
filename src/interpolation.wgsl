@@ -114,10 +114,6 @@ fn voxel_coord_from_center(world_center: vec3<f32>) -> vec3<i32> {
     return vec3<i32>(floor((world_center - OBJECT_BOUNDS_MIN) / size));
 }
 
-fn voxel_center_from_coord(voxel_coord: vec3<i32>) -> vec3<f32> {
-    return OBJECT_BOUNDS_MIN + (vec3<f32>(voxel_coord) + vec3<f32>(0.5)) * voxel_size();
-}
-
 fn tangent_axis_0(face_axis: u32) -> u32 {
     if (face_axis == 0u) {
         return 1u;
@@ -183,82 +179,50 @@ fn project_world_to_uv(world_position: vec3<f32>) -> vec3<f32> {
 
 fn sample_projected_face(
     expected_voxel_coord: vec3<i32>,
-    expected_face_center: vec3<f32>,
+    expected_face_position: vec3<f32>,
     source_face_normal: vec3<i32>,
     source_face_axis: u32,
     source_face_plane: f32,
     current_color: vec3<f32>,
     dimensions: vec2<u32>,
 ) -> SampleResult {
-    let projected = project_world_to_uv(expected_face_center);
+    let projected = project_world_to_uv(expected_face_position);
     if (projected.z < 0.5) {
         return SampleResult(false, current_color, 1u);
     }
 
-    let base_pixel = pixel_coord(projected.xy, dimensions);
-    let plane_tolerance = voxel_size() * FACE_PLANE_TOLERANCE_SCALE;
-    let offsets = array<vec2<i32>, 13>(
-        vec2<i32>(0, 0),
-        vec2<i32>(1, 0),
-        vec2<i32>(-1, 0),
-        vec2<i32>(0, 1),
-        vec2<i32>(0, -1),
-        vec2<i32>(1, 1),
-        vec2<i32>(1, -1),
-        vec2<i32>(-1, 1),
-        vec2<i32>(-1, -1),
-        vec2<i32>(2, 0),
-        vec2<i32>(-2, 0),
-        vec2<i32>(0, 2),
-        vec2<i32>(0, -2),
-    );
-
-    var best_error = 1e9;
-    var best_color = current_color;
-    var found = false;
-    var rejected_samples = 0u;
-
-    for (var offset_index = 0; offset_index < 13; offset_index = offset_index + 1) {
-        let candidate_pixel = base_pixel + offsets[offset_index];
-        if (!pixel_in_bounds(candidate_pixel, dimensions)) {
-            continue;
-        }
-
-        let sampled_center = textureLoad(world_position_texture, candidate_pixel, 0);
-        let sampled_shading_input = textureLoad(shading_input_texture, candidate_pixel, 0);
-        if (!is_visible_voxel(sampled_center) || sampled_shading_input.w <= 0.0) {
-            rejected_samples = rejected_samples + 1u;
-            continue;
-        }
-
-        let candidate_uv = (vec2<f32>(candidate_pixel) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
-        let candidate_hit_world_position =
-            camera.position.xyz + compute_camera_ray_direction(candidate_uv) * sampled_shading_input.w;
-        let candidate_face =
-            derive_face_info(sampled_center.xyz, candidate_hit_world_position, sampled_shading_input.xyz);
-        let coord_matches = all(candidate_face.voxel_coord == expected_voxel_coord);
-        let normal_matches = all(candidate_face.normal == source_face_normal);
-        let coplanar =
-            candidate_face.axis == source_face_axis
-            && abs(candidate_face.plane - source_face_plane) <= plane_tolerance;
-
-        if (!coord_matches || !normal_matches || !coplanar) {
-            rejected_samples = rejected_samples + 1u;
-            continue;
-        }
-
-        let screen_offset = vec2<f32>(candidate_pixel) + vec2<f32>(0.5) - projected.xy * vec2<f32>(dimensions);
-        let screen_error = dot(screen_offset, screen_offset);
-        if (screen_error >= best_error) {
-            continue;
-        }
-
-        found = true;
-        best_error = screen_error;
-        best_color = textureLoad(current_texture, candidate_pixel, 0).xyz;
+    let candidate_pixel = pixel_coord(projected.xy, dimensions);
+    if (!pixel_in_bounds(candidate_pixel, dimensions)) {
+        return SampleResult(false, current_color, 1u);
     }
 
-    return SampleResult(found, best_color, rejected_samples);
+    let sampled_center = textureLoad(world_position_texture, candidate_pixel, 0);
+    if (!is_visible_voxel(sampled_center)) {
+        return SampleResult(false, current_color, 1u);
+    }
+
+    let sampled_shading_input = textureLoad(shading_input_texture, candidate_pixel, 0);
+    if (sampled_shading_input.w <= 0.0) {
+        return SampleResult(false, current_color, 1u);
+    }
+
+    let candidate_uv = (vec2<f32>(candidate_pixel) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
+    let candidate_hit_world_position =
+        camera.position.xyz + compute_camera_ray_direction(candidate_uv) * sampled_shading_input.w;
+    let candidate_face =
+        derive_face_info(sampled_center.xyz, candidate_hit_world_position, sampled_shading_input.xyz);
+    let plane_tolerance = voxel_size() * FACE_PLANE_TOLERANCE_SCALE;
+    let coord_matches = all(candidate_face.voxel_coord == expected_voxel_coord);
+    let normal_matches = all(candidate_face.normal == source_face_normal);
+    let coplanar =
+        candidate_face.axis == source_face_axis
+        && abs(candidate_face.plane - source_face_plane) <= plane_tolerance;
+
+    if (!coord_matches || !normal_matches || !coplanar) {
+        return SampleResult(false, current_color, 1u);
+    }
+
+    return SampleResult(true, textureLoad(current_texture, candidate_pixel, 0).xyz, 0u);
 }
 
 fn bilinear_weighted_sum(
@@ -345,9 +309,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let size = voxel_size();
     let hit_world_position = camera.position.xyz + compute_camera_ray_direction(in.uv) * hit_depth;
     let source_face = derive_face_info(current_center.xyz, hit_world_position, shading_input.xyz);
-    let source_face_center =
-        voxel_center_from_coord(source_face.voxel_coord)
-        + vec3<f32>(source_face.normal) * size * 0.5;
 
     var accumulated = vec4<f32>(0.0);
     var valid_neighbour_count = 0u;
@@ -364,9 +325,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             var sample = SampleResult(true, current_color, 0u);
 
             if (tangent_x != 0 || tangent_y != 0) {
+                let expected_face_position = hit_world_position + vec3<f32>(face_offset) * size;
                 sample = sample_projected_face(
                     source_face.voxel_coord + face_offset,
-                    source_face_center + vec3<f32>(face_offset) * size,
+                    expected_face_position,
                     source_face.normal,
                     source_face.axis,
                     source_face.plane,
