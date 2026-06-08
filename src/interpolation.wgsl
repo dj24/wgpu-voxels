@@ -273,6 +273,16 @@ fn bilinear_weighted_sum(
     return vec4<f32>(accumulated_color + sample.color * weight, accumulated_weight + weight);
 }
 
+fn face_axis_weight(offset: i32, uv: f32) -> f32 {
+    if (offset < 0) {
+        return 0.5 * (1.0 - uv) * (1.0 - uv);
+    }
+    if (offset > 0) {
+        return 0.5 * uv * uv;
+    }
+    return 0.5 + uv * (1.0 - uv);
+}
+
 fn debug_face_axis_color(face_axis: u32, face_sign: f32) -> vec3<f32> {
     var color = vec3<f32>(0.0);
     if (face_axis == 0u) {
@@ -335,72 +345,56 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let size = voxel_size();
     let hit_world_position = camera.position.xyz + compute_camera_ray_direction(in.uv) * hit_depth;
     let source_face = derive_face_info(current_center.xyz, hit_world_position, shading_input.xyz);
-    let step_0 = select(-1, 1, source_face.face_uv.x >= 0.5);
-    let step_1 = select(-1, 1, source_face.face_uv.y >= 0.5);
-    let tangent_offset_0 = axis_step(source_face.tangent_axis_0, step_0);
-    let tangent_offset_1 = axis_step(source_face.tangent_axis_1, step_1);
     let source_face_center =
         voxel_center_from_coord(source_face.voxel_coord)
         + vec3<f32>(source_face.normal) * size * 0.5;
 
-    let coord_0 = source_face.voxel_coord + tangent_offset_0;
-    let coord_1 = source_face.voxel_coord + tangent_offset_1;
-    let coord_diagonal = source_face.voxel_coord + tangent_offset_0 + tangent_offset_1;
-    let sample_source = SampleResult(true, current_color, 0u);
-    let sample_0 = sample_projected_face(
-        coord_0,
-        source_face_center + vec3<f32>(tangent_offset_0) * size,
-        source_face.normal,
-        source_face.axis,
-        source_face.plane,
-        current_color,
-        dimensions,
-    );
-    let sample_1 = sample_projected_face(
-        coord_1,
-        source_face_center + vec3<f32>(tangent_offset_1) * size,
-        source_face.normal,
-        source_face.axis,
-        source_face.plane,
-        current_color,
-        dimensions,
-    );
-    let sample_diagonal = sample_projected_face(
-        coord_diagonal,
-        source_face_center + vec3<f32>(tangent_offset_0 + tangent_offset_1) * size,
-        source_face.normal,
-        source_face.axis,
-        source_face.plane,
-        current_color,
-        dimensions,
-    );
+    var accumulated = vec4<f32>(0.0);
+    var valid_neighbour_count = 0u;
+    var rejected_sample_count = 0u;
 
-    let t = abs(source_face.face_uv - vec2<f32>(0.5)) * 2.0;
-    let source_weight = (1.0 - t.x) * (1.0 - t.y);
-    let weight_0 = t.x * (1.0 - t.y);
-    let weight_1 = (1.0 - t.x) * t.y;
-    let diagonal_weight = t.x * t.y;
+    for (var tangent_y = -1; tangent_y <= 1; tangent_y = tangent_y + 1) {
+        for (var tangent_x = -1; tangent_x <= 1; tangent_x = tangent_x + 1) {
+            let face_offset =
+                axis_step(source_face.tangent_axis_0, tangent_x)
+                + axis_step(source_face.tangent_axis_1, tangent_y);
+            let weight =
+                face_axis_weight(tangent_x, source_face.face_uv.x)
+                * face_axis_weight(tangent_y, source_face.face_uv.y);
+            var sample = SampleResult(true, current_color, 0u);
 
-    var accumulated = bilinear_weighted_sum(sample_source, source_weight, vec3<f32>(0.0), 0.0);
-    accumulated = bilinear_weighted_sum(sample_0, weight_0, accumulated.xyz, accumulated.w);
-    accumulated = bilinear_weighted_sum(sample_1, weight_1, accumulated.xyz, accumulated.w);
-    accumulated = bilinear_weighted_sum(sample_diagonal, diagonal_weight, accumulated.xyz, accumulated.w);
+            if (tangent_x != 0 || tangent_y != 0) {
+                sample = sample_projected_face(
+                    source_face.voxel_coord + face_offset,
+                    source_face_center + vec3<f32>(face_offset) * size,
+                    source_face.normal,
+                    source_face.axis,
+                    source_face.plane,
+                    current_color,
+                    dimensions,
+                );
+                valid_neighbour_count = valid_neighbour_count + select(0u, 1u, sample.valid);
+                rejected_sample_count = rejected_sample_count + sample.rejected_samples;
+            }
 
-    let valid_neighbour_count =
-        select(0u, 1u, sample_0.valid)
-        + select(0u, 1u, sample_1.valid)
-        + select(0u, 1u, sample_diagonal.valid);
-    let rejected_sample_count =
-        sample_0.rejected_samples + sample_1.rejected_samples + sample_diagonal.rejected_samples;
+            accumulated = bilinear_weighted_sum(sample, weight, accumulated.xyz, accumulated.w);
+        }
+    }
 
     if (DEBUG_FACE_OUTPUT_MODE == DEBUG_FACE_OUTPUT_AXIS) {
         return vec4<f32>(debug_face_axis_color(source_face.axis, source_face.sign), 1.0);
     }
     if (DEBUG_FACE_OUTPUT_MODE == DEBUG_FACE_OUTPUT_QUADRANT) {
-        return vec4<f32>(debug_quadrant_color(step_0, step_1), 1.0);
+        return vec4<f32>(
+            debug_quadrant_color(
+                select(-1, 1, source_face.face_uv.x >= 0.5),
+                select(-1, 1, source_face.face_uv.y >= 0.5),
+            ),
+            1.0,
+        );
     }
     if (DEBUG_FACE_OUTPUT_MODE == DEBUG_FACE_OUTPUT_VALID_NEIGHBOURS) {
-        return vec4<f32>(debug_count_color(valid_neighbour_count, 3.0), 1.0);
+        return vec4<f32>(debug_count_color(valid_neighbour_count, 8.0), 1.0);
     }
     if (DEBUG_FACE_OUTPUT_MODE == DEBUG_FACE_OUTPUT_REJECTED_SAMPLES) {
         return vec4<f32>(debug_count_color(min(rejected_sample_count, 13u), 13.0), 1.0);
