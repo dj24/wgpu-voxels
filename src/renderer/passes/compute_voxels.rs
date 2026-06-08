@@ -694,7 +694,10 @@ impl ComputeVoxelsPass {
             consume_pass.dispatch_workgroups_indirect(&self.shade_dispatch_args_buffer, 0);
         }
 
-        if matches!(debug_view, DebugView::Default | DebugView::SamplingRate) {
+        if matches!(
+            debug_view,
+            DebugView::Default | DebugView::SamplingRate | DebugView::Interpolated
+        ) {
             return;
         }
 

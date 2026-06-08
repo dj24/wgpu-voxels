@@ -128,6 +128,7 @@ const DEBUG_VIEW_DEPTH: u32 = 3u;
 const DEBUG_VIEW_NORMALS: u32 = 4u;
 const DEBUG_VIEW_SAMPLING_RATE: u32 = 5u;
 const DEBUG_VIEW_MOTION_VECTORS: u32 = 6u;
+const DEBUG_VIEW_INTERPOLATED: u32 = 7u;
 const SUN_ROTATION_SPEED_RADIANS: f32 = 0.15;
 
 var<workgroup> shared_keys: array<vec4<f32>, 64>;
@@ -313,10 +314,6 @@ fn unpack_leaf_color(packed_voxel: u32) -> vec3<f32> {
         f32((packed_voxel >> 20u) & 0x3fu) / 63.0,
         f32((packed_voxel >> 26u) & 0x3fu) / 63.0,
     );
-}
-
-fn unpack_material_type(packed_voxel: u32) -> u32 {
-    return packed_voxel & 0x3u;
 }
 
 fn ray_box(
@@ -1060,10 +1057,9 @@ fn trace_world_position_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let world_normal =
             normalize((candidate.object_to_world * vec4<f32>(local_normal, 0.0)).xyz);
         let surface_color = unpack_leaf_color(marched.packed_voxel);
-        let material_type = unpack_material_type(marched.packed_voxel);
         let previous_uv = project_world_to_uv(previous_camera, hit_world_position);
         stored_world_position = vec4<f32>(world_position, f32(accumulated_step_count) + 1.0);
-        stored_shading_input = vec4<f32>(world_normal, f32(material_type));
+        stored_shading_input = vec4<f32>(world_normal, hit_t);
         stored_surface_color = vec4<f32>(surface_color, 1.0);
         if (previous_uv.z > 0.5) {
             stored_motion_vector = vec4<f32>(uv - previous_uv.xy, 1.0, 0.0);

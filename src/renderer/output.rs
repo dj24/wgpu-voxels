@@ -15,6 +15,8 @@ pub(crate) const COARSE_DEPTH_DIVISOR: u32 = 2;
 pub(crate) struct OutputTarget {
     output_texture: wgpu::Texture,
     output_view: wgpu::TextureView,
+    interpolated_texture: wgpu::Texture,
+    interpolated_view: wgpu::TextureView,
     history_textures: [wgpu::Texture; 2],
     history_views: [wgpu::TextureView; 2],
     _world_position_texture: wgpu::Texture,
@@ -54,6 +56,24 @@ impl OutputTarget {
             view_formats: &[],
         });
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let interpolated_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("interpolated output texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OUTPUT_TEXTURE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let interpolated_view =
+            interpolated_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let history_textures = core::array::from_fn(|index| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(if index == 0 {
@@ -190,6 +210,8 @@ impl OutputTarget {
         Self {
             output_texture,
             output_view,
+            interpolated_texture,
+            interpolated_view,
             history_textures,
             history_views,
             _world_position_texture: world_position_texture,
@@ -215,6 +237,10 @@ impl OutputTarget {
 
     pub(crate) fn view(&self) -> &wgpu::TextureView {
         &self.output_view
+    }
+
+    pub(crate) fn interpolated_view(&self) -> &wgpu::TextureView {
+        &self.interpolated_view
     }
 
     pub(crate) fn coarse_depth_view(&self) -> &wgpu::TextureView {
@@ -298,6 +324,15 @@ impl OutputTarget {
         path: &Path,
     ) -> Result<(), String> {
         self.save_texture_png(device, queue, &self.output_texture, path)
+    }
+
+    pub(crate) fn save_interpolated_png(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: &Path,
+    ) -> Result<(), String> {
+        self.save_texture_png(device, queue, &self.interpolated_texture, path)
     }
 
     fn save_texture_png(

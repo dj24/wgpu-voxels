@@ -22,7 +22,10 @@ use crate::{
 use self::{
     context::GpuContext,
     output::OutputTarget,
-    passes::{BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass, TemporalBlendPass},
+    passes::{
+        BlitPass, ComputeVoxelsPass, FpsOverlay, GenerateVoxelsPass, InterpolationPass,
+        TemporalBlendPass,
+    },
 };
 
 #[repr(u32)]
@@ -36,6 +39,7 @@ pub(crate) enum DebugView {
     Normals = 4,
     SamplingRate = 5,
     MotionVectors = 6,
+    Interpolated = 7,
 }
 
 struct PresentationPasses {
@@ -71,6 +75,7 @@ pub(crate) struct Renderer {
     generate_voxels_pass: GenerateVoxelsPass,
     compute_pass: ComputeVoxelsPass,
     temporal_blend_pass: TemporalBlendPass,
+    interpolation_pass: InterpolationPass,
     temporal_history_index: usize,
     temporal_history_valid: bool,
     presentation: Option<PresentationPasses>,
@@ -165,6 +170,13 @@ impl Renderer {
             ],
             &previous_camera_buffer,
         );
+        let interpolation_pass = InterpolationPass::new(
+            &context.device,
+            output_target.view(),
+            output_target.world_position_view(),
+            output_target.shading_input_view(),
+            &camera_buffer,
+        );
         let presentation = context.window.as_ref().map(|_| PresentationPasses {
             blit_pass: BlitPass::new(
                 &context.device,
@@ -192,6 +204,7 @@ impl Renderer {
             generate_voxels_pass,
             compute_pass,
             temporal_blend_pass,
+            interpolation_pass,
             temporal_history_index: 0,
             temporal_history_valid: false,
             presentation,
@@ -321,11 +334,22 @@ impl Renderer {
             coarse_height,
             self.debug_view,
         );
-        let present_view = if self.temporal_enabled() {
-            self.accumulate_temporal_history(&mut encoder);
-            self.output_target.history_view(self.temporal_history_index)
-        } else {
-            self.output_target.view()
+        self.accumulate_temporal_history(&mut encoder);
+        let present_view = match self.debug_view {
+            DebugView::Default => self.output_target.history_view(self.temporal_history_index),
+            DebugView::Interpolated => {
+                self.interpolation_pass.rebind(
+                    &self.context.device,
+                    self.output_target.history_view(self.temporal_history_index),
+                    self.output_target.world_position_view(),
+                    self.output_target.shading_input_view(),
+                    &self.camera_buffer,
+                );
+                self.interpolation_pass
+                    .draw(&mut encoder, self.output_target.interpolated_view());
+                self.output_target.interpolated_view()
+            }
+            _ => self.output_target.view(),
         };
         let presentation = self
             .presentation
@@ -390,8 +414,20 @@ impl Renderer {
             coarse_height,
             self.debug_view,
         );
-        if self.temporal_enabled() {
-            self.accumulate_temporal_history(&mut encoder);
+        self.accumulate_temporal_history(&mut encoder);
+        match self.debug_view {
+            DebugView::Interpolated => {
+                self.interpolation_pass.rebind(
+                    &self.context.device,
+                    self.output_target.history_view(self.temporal_history_index),
+                    self.output_target.world_position_view(),
+                    self.output_target.shading_input_view(),
+                    &self.camera_buffer,
+                );
+                self.interpolation_pass
+                    .draw(&mut encoder, self.output_target.interpolated_view());
+            }
+            _ => {}
         }
 
         self.context.queue.submit(Some(encoder.finish()));
@@ -400,16 +436,22 @@ impl Renderer {
     }
 
     pub(crate) fn save_headless_png(&self, path: &Path) -> Result<(), String> {
-        if self.temporal_enabled() {
-            self.output_target.save_png(
+        match self.debug_view {
+            DebugView::Default => self.output_target.save_png(
                 &self.context.device,
                 &self.context.queue,
                 path,
                 self.temporal_history_index,
-            )
-        } else {
-            self.output_target
-                .save_output_png(&self.context.device, &self.context.queue, path)
+            ),
+            DebugView::Interpolated => self.output_target.save_interpolated_png(
+                &self.context.device,
+                &self.context.queue,
+                path,
+            ),
+            _ => {
+                self.output_target
+                    .save_output_png(&self.context.device, &self.context.queue, path)
+            }
         }
     }
 
@@ -449,6 +491,13 @@ impl Renderer {
             ],
             &self.previous_camera_buffer,
         );
+        self.interpolation_pass.rebind(
+            &self.context.device,
+            self.output_target.view(),
+            self.output_target.world_position_view(),
+            self.output_target.shading_input_view(),
+            &self.camera_buffer,
+        );
         self.reset_temporal_history();
         if let Some(presentation) = self.presentation.as_mut() {
             presentation
@@ -482,10 +531,6 @@ impl Renderer {
         self.temporal_history_valid = false;
         self.previous_camera_uniform = self.current_camera_uniform;
         self.sync_previous_camera_buffer();
-    }
-
-    fn temporal_enabled(&self) -> bool {
-        matches!(self.debug_view, DebugView::Default)
     }
 
     fn update_camera_buffer(&mut self) {

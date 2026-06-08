@@ -19,6 +19,10 @@ cargo run
 cargo run -- --headless-png screenshot-headless.png --delay-ms 1000
 ```
 
+```powershell
+cargo run -- --headless-png screenshot-headless.png --delay-ms 1000 --debug-view interpolated
+```
+
 The renderer currently requests Vulkan and `wgpu` experimental ray query support,
 so it needs a compatible GPU/driver.
 
@@ -68,8 +72,14 @@ The interactive renderer supports runtime debug view toggles:
 - `5` shows world-space normals remapped into RGB.
 - `6` shows the sampling rate:
   blue for `1x1`, green for `2x2`, and red for `4x4` shading.
+- `7` shows motion vectors.
+- `8` shows the interpolation experiment.
 
 Most debug views are applied as a fullscreen compute pass after the normal
 shaded frame is generated. The sampling-rate view reuses the emitted shade
 commands directly so it can display the active `1x1`/`2x2`/`4x4` command
 coverage.
+
+Headless captures can start in any supported view with `--debug-view`:
+`default`, `heatmap`, `world-position`, `depth`, `normals`, `sampling-rate`,
+`motion-vectors`, or `interpolated`.

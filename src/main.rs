@@ -25,26 +25,33 @@ use scene::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = RuntimeConfig::from_env_args()?;
     match config.launch_mode {
-        LaunchMode::Windowed => run_interactive()?,
-        LaunchMode::HeadlessCapture { output_path, delay } => run_headless(&output_path, delay)?,
+        LaunchMode::Windowed => run_interactive(config.debug_view)?,
+        LaunchMode::HeadlessCapture { output_path, delay } => {
+            run_headless(&output_path, delay, config.debug_view)?
+        }
     }
     Ok(())
 }
 
-fn run_interactive() -> Result<(), Box<dyn std::error::Error>> {
+fn run_interactive(debug_view: DebugView) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
-    let mut app = App::default();
+    let mut app = App::new(debug_view);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
 
-fn run_headless(output_path: &Path, delay: Duration) -> Result<(), Box<dyn std::error::Error>> {
+fn run_headless(
+    output_path: &Path,
+    delay: Duration,
+    debug_view: DebugView,
+) -> Result<(), Box<dyn std::error::Error>> {
     const DEFAULT_CAPTURE_SIZE: PhysicalSize<u32> = PhysicalSize::new(1280, 720);
 
     let mut world = build_scene_world();
     load_max_active_chunks(&mut world);
     let objects = collect_active_render_objects(&world);
     let mut renderer = pollster::block_on(Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &objects))?;
+    renderer.set_debug_view(debug_view);
     std::thread::sleep(delay);
     renderer.update_camera(&InputState::default(), delay.as_secs_f32());
     renderer.render_headless()?;
@@ -55,6 +62,7 @@ fn run_headless(output_path: &Path, delay: Duration) -> Result<(), Box<dyn std::
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeConfig {
     launch_mode: LaunchMode,
+    debug_view: DebugView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +87,7 @@ where
 {
     let mut output_path = None;
     let mut delay = None;
+    let mut debug_view = DebugView::Default;
     let mut args = args.into_iter().map(Into::into);
 
     while let Some(arg) = args.next() {
@@ -100,6 +109,14 @@ where
                     .map_err(|_| format!("invalid --delay-ms value: {raw_delay}"))?;
                 delay = Some(Duration::from_millis(parsed_delay));
             }
+            "--debug-view" => {
+                let Some(raw_debug_view) = args.next() else {
+                    return Err(String::from(
+                        "expected a debug view name after --debug-view",
+                    ));
+                };
+                debug_view = parse_debug_view_name(&raw_debug_view)?;
+            }
             _ => return Err(format!("unrecognized argument: {arg}")),
         }
     }
@@ -107,9 +124,11 @@ where
     match (output_path, delay) {
         (None, None) => Ok(RuntimeConfig {
             launch_mode: LaunchMode::Windowed,
+            debug_view,
         }),
         (Some(output_path), Some(delay)) => Ok(RuntimeConfig {
             launch_mode: LaunchMode::HeadlessCapture { output_path, delay },
+            debug_view,
         }),
         (Some(_), None) => Err(String::from(
             "--delay-ms is required when using --headless-png",
@@ -129,12 +148,12 @@ struct App {
     last_frame_at: Option<Instant>,
 }
 
-impl Default for App {
-    fn default() -> Self {
+impl App {
+    fn new(debug_view: DebugView) -> Self {
         let world = build_scene_world();
         Self {
             renderer: None,
-            debug_view: DebugView::Default,
+            debug_view,
             scene_snapshot: ActiveSceneSnapshot {
                 active_count: collect_active_render_objects(&world).len(),
             },
@@ -142,6 +161,12 @@ impl Default for App {
             input: InputState::default(),
             last_frame_at: None,
         }
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new(DebugView::Default)
     }
 }
 
@@ -259,16 +284,7 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if event.state == ElementState::Pressed {
-                        let debug_view = match code {
-                            KeyCode::Digit1 => Some(DebugView::Default),
-                            KeyCode::Digit2 => Some(DebugView::Heatmap),
-                            KeyCode::Digit3 => Some(DebugView::WorldPosition),
-                            KeyCode::Digit4 => Some(DebugView::Depth),
-                            KeyCode::Digit5 => Some(DebugView::Normals),
-                            KeyCode::Digit6 => Some(DebugView::SamplingRate),
-                            KeyCode::Digit7 => Some(DebugView::MotionVectors),
-                            _ => None,
-                        };
+                        let debug_view = debug_view_for_key_code(code);
                         if let Some(debug_view) = debug_view {
                             self.debug_view = debug_view;
                             renderer.set_debug_view(debug_view);
@@ -331,10 +347,40 @@ impl ApplicationHandler for App {
     }
 }
 
+fn debug_view_for_key_code(code: KeyCode) -> Option<DebugView> {
+    match code {
+        KeyCode::Digit1 => Some(DebugView::Default),
+        KeyCode::Digit2 => Some(DebugView::Heatmap),
+        KeyCode::Digit3 => Some(DebugView::WorldPosition),
+        KeyCode::Digit4 => Some(DebugView::Depth),
+        KeyCode::Digit5 => Some(DebugView::Normals),
+        KeyCode::Digit6 => Some(DebugView::SamplingRate),
+        KeyCode::Digit7 => Some(DebugView::MotionVectors),
+        KeyCode::Digit8 => Some(DebugView::Interpolated),
+        _ => None,
+    }
+}
+
+fn parse_debug_view_name(name: &str) -> Result<DebugView, String> {
+    match name {
+        "default" => Ok(DebugView::Default),
+        "heatmap" => Ok(DebugView::Heatmap),
+        "world-position" => Ok(DebugView::WorldPosition),
+        "depth" => Ok(DebugView::Depth),
+        "normals" => Ok(DebugView::Normals),
+        "sampling-rate" => Ok(DebugView::SamplingRate),
+        "motion-vectors" => Ok(DebugView::MotionVectors),
+        "interpolated" => Ok(DebugView::Interpolated),
+        _ => Err(format!("invalid --debug-view value: {name}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LaunchMode, RuntimeConfig, parse_runtime_config};
+    use super::{LaunchMode, RuntimeConfig, debug_view_for_key_code, parse_runtime_config};
+    use crate::renderer::DebugView;
     use std::{path::PathBuf, time::Duration};
+    use winit::keyboard::KeyCode;
 
     #[test]
     fn headless_mode_accepts_path_and_delay() {
@@ -347,6 +393,7 @@ mod tests {
                     output_path: PathBuf::from("capture.png"),
                     delay: Duration::from_millis(1500),
                 },
+                debug_view: DebugView::Default,
             }
         );
     }
@@ -362,5 +409,27 @@ mod tests {
     fn delay_requires_headless_mode() {
         let error = parse_runtime_config(["--delay-ms", "1000"]).expect_err("missing output path");
         assert!(error.contains("--headless-png is required when using --delay-ms"));
+    }
+
+    #[test]
+    fn debug_view_argument_is_parsed() {
+        let config = parse_runtime_config([
+            "--headless-png",
+            "capture.png",
+            "--delay-ms",
+            "1500",
+            "--debug-view",
+            "interpolated",
+        ])
+        .expect("debug view config");
+        assert_eq!(config.debug_view, DebugView::Interpolated);
+    }
+
+    #[test]
+    fn digit_eight_maps_to_interpolated_debug_view() {
+        assert_eq!(
+            debug_view_for_key_code(KeyCode::Digit8),
+            Some(DebugView::Interpolated)
+        );
     }
 }
