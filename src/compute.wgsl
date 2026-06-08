@@ -24,6 +24,13 @@ struct RayMarch {
     step_count: u32,
 }
 
+struct BounceHit {
+    hit: bool,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    color: vec3<f32>,
+}
+
 struct BoxIntersection {
     hit: bool,
     t_enter: f32,
@@ -118,8 +125,8 @@ const OBJECT_BOUNDS_MIN: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const OBJECT_BOUNDS_MAX: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 const COARSE_DEPTH_BIAS_SCALE: f32 = 0.0;
 const PRIMARY_RAY_T_MAX: f32 = 100.0;
-const SHADOW_RAY_T_MIN: f32 = 0.001;
-const SHADOW_RAY_T_MAX: f32 = 100.0;
+const BOUNCE_RAY_T_MIN: f32 = 0.001;
+const BOUNCE_RAY_T_MAX: f32 = 100.0;
 const SHADE_COMMAND_WORKGROUP_SIZE: u32 = 64u;
 const DEBUG_VIEW_DEFAULT: u32 = 0u;
 const DEBUG_VIEW_HEATMAP: u32 = 1u;
@@ -723,14 +730,9 @@ fn shade_from_input(base_color: vec3<f32>, shading_input: vec4<f32>) -> vec3<f32
     return shade_ndotl(base_color, shading_input.xyz);
 }
 
-fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
-    let normal = normalize(world_normal);
-    let ray_direction = cosine_weighted_hemisphere_sample(normal, world_position);
-    let ray_origin =
-        world_position + ray_direction * voxel_size();
-
+fn trace_diffuse_bounce(ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> BounceHit {
     var query: ray_query;
-    let ray = RayDesc(0u, 0xffu, SHADOW_RAY_T_MIN, SHADOW_RAY_T_MAX, ray_origin, ray_direction);
+    let ray = RayDesc(0u, 0xffu, BOUNCE_RAY_T_MIN, BOUNCE_RAY_T_MAX, ray_origin, ray_direction);
     rayQueryInitialize(&query, scene_tlas, ray);
 
     while (rayQueryProceed(&query)) {
@@ -753,11 +755,45 @@ fn sun_visibility(world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
         );
 
         if (marched.hit) {
-            return 0.0;
+            let hit_world_position = ray_origin + ray_direction * marched.t;
+            let local_normal = unpack_leaf_normal(marched.packed_voxel);
+            let world_normal =
+                normalize((candidate.object_to_world * vec4<f32>(local_normal, 0.0)).xyz);
+            return BounceHit(
+                true,
+                hit_world_position,
+                world_normal,
+                unpack_leaf_color(marched.packed_voxel),
+            );
         }
     }
 
-    return 1.0;
+    return BounceHit(false, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0));
+}
+
+fn diffuse_bounce_tint(
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+) -> vec3<f32> {
+    let normal = normalize(world_normal);
+    let ray_direction = cosine_weighted_hemisphere_sample(normal, world_position);
+    let ray_origin =
+        world_position + ray_direction * voxel_size();
+    let first_hit = trace_diffuse_bounce(ray_origin, ray_direction);
+    if (!first_hit.hit) {
+        return vec3<f32>(1.0);
+    }
+
+    let second_ray_direction =
+        cosine_weighted_hemisphere_sample(first_hit.world_normal, first_hit.world_position);
+    let second_ray_origin =
+        first_hit.world_position + second_ray_direction * voxel_size();
+    let second_hit = trace_diffuse_bounce(second_ray_origin, second_ray_direction);
+    if (second_hit.hit) {
+        return vec3<f32>(0.15);
+    }
+
+    return mix(vec3<f32>(1.0), first_hit.color, 0.5);
 }
 
 fn shaded_color(
@@ -765,8 +801,8 @@ fn shaded_color(
     shading_input: vec4<f32>,
     surface_color: vec3<f32>,
 ) -> vec3<f32> {
-    let visibility = sun_visibility(world_position, shading_input.xyz);
-    return shade_from_input(surface_color, shading_input) * mix(visibility, 1.0, 0.15);
+    let bounce_tint = diffuse_bounce_tint(world_position, shading_input.xyz);
+    return shade_from_input(surface_color, shading_input) * bounce_tint;
 }
 
 fn encoded_step_count(world_position: vec4<f32>) -> u32 {
